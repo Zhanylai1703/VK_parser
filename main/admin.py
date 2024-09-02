@@ -48,7 +48,10 @@ admin.site.register(VKGroup, VKGroupAdmin)
 
 @admin.register(ParsingSettings)
 class ParsingSettingsAdmin(admin.ModelAdmin):
-    pass
+    def has_add_permission(self, request):
+        if ParsingSettings.objects.exists():
+            return False
+        return super().has_add_permission(request)
 
 
 @admin.register(UserToken)
