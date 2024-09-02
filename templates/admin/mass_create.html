@@ -1,0 +1,17 @@
+<!-- templates/admin/mass_create.html -->
+{% extends "admin/base_site.html" %}
+{% block content %}
+  <h1>Массовое создание групп</h1>
+  <form method="post">
+      {% csrf_token %}
+      {{ form.as_p }}
+      <button type="submit">Создать группы</button>
+  </form>
+  {% if messages %}
+      <ul>
+          {% for message in messages %}
+              <li>{{ message }}</li>
+          {% endfor %}
+      </ul>
+  {% endif %}
+{% endblock %}

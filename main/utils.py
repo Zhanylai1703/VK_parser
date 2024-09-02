@@ -1,15 +1,21 @@
+import os
 import re
-from datetime import datetime
+import tempfile
 
+import requests
+from datetime import datetime
+from django.utils import timezone
 import vk_api
 import gspread
+from django.db.models import F
 from oauth2client.service_account import ServiceAccountCredentials
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
+from gspread.exceptions import SpreadsheetNotFound
 
 import logging
 
-from main.models import VKGroup
+from main.models import VKGroup, UserToken, ParsingSettings
 
 logger = logging.getLogger(__name__)
 
@@ -21,30 +27,26 @@ creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FI
 service = build('sheets', 'v4', credentials=creds)
 
 
-def get_google_sheet(sheet_name, sheet_type):
+def get_google_sheet(sheet_name):
+    settings = ParsingSettings.objects.first()  # Получаем настройки, если их несколько, нужно изменить логику
+    if not settings:
+        raise ValueError("Настройки парсинга не найдены.")
+
+    file_path = settings.get_google_sheet_credentials()
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name('vk-parser-433009-ba7bf6f870b6.json', scope)
+    creds = ServiceAccountCredentials.from_json_keyfile_name(file_path, scope)
     client = gspread.authorize(creds)
 
     try:
         spreadsheet = client.open(sheet_name)
-        if sheet_type == 'Лист1':
-            sheet = spreadsheet.worksheet('Лист1')
-        elif sheet_type == 'Лист2':
-            sheet = spreadsheet.worksheet('Лист2')
-        else:
-            raise ValueError(f"Unknown sheet type: {sheet_type}")
-        print(f"Found existing spreadsheet '{sheet_name}' with sheet '{sheet_type}'")
-        print(f"Spreadsheet URL: {spreadsheet.url}")
-        return sheet
+        print(f"Найден существующий файл '{sheet_name}'")
+        print(f"URL файла: {spreadsheet.url}")
+        return spreadsheet
     except gspread.exceptions.SpreadsheetNotFound:
-        print(f"Spreadsheet '{sheet_name}' not found. Please make sure the spreadsheet exists.")
-        return None
-    except gspread.exceptions.WorksheetNotFound:
-        print(f"Worksheet '{sheet_type}' not found in spreadsheet '{sheet_name}'.")
+        print(f"Файл '{sheet_name}' не найден. Убедитесь, что файл существует.")
         return None
     except Exception as e:
-        print(f"Error while accessing Google Sheets: {e}")
+        print(f"Ошибка при доступе к Google Sheets: {e}")
         raise
 
 
@@ -63,7 +65,7 @@ def save_to_google_sheet_worksheet(worksheet, data):
 
 
 def filter_text(text, key_words, stop_words):
-    key_words = truncate_keywords(key_words)  # Truncate long keywords
+    key_words = truncate_keywords(key_words)
     key_words_regex = '|'.join(re.escape(word) for word in key_words)
     stop_words_regex = '|'.join(re.escape(word) for word in stop_words)
 
@@ -83,56 +85,175 @@ def truncate_keywords(keywords):
     return [kw if len(kw) <= 8 else kw[:-2] for kw in keywords]
 
 
-def save_to_google_sheet(sheet_name, sheet_type, data_type, items):
-    sheet = get_google_sheet(sheet_name, sheet_type)
-    if sheet:
-        for item in items:
-            text = clean_text(item.get('text', ''))  # Clean the text
-            current_date_and_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            profile_link = f"https://vk.com/id{item.get('from_id')}" if item.get('from_id') else 'N/A'
-            publication_date_timestamp = item.get('date')  # Временная метка из VK API
-            if publication_date_timestamp:
-                publication_date = datetime.fromtimestamp(publication_date_timestamp).strftime('%Y-%m-%d %H:%M:%S')
-            else:
-                publication_date = 'N/A'
+def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, key_words, stop_words):
+    try:
+        # Получение настроек из базы данных (если используется)
+        settings = ParsingSettings.objects.first()
+        if not settings:
+            print("Настройки не найдены.")
+            return
 
-            group = VKGroup.objects.filter(group_id=item.get('owner_id')).first()
-            if group:
-                group_domain = group.domain  # Используем domain в качестве имени группы
-                group_description = group.description if group.description else 'N/A'
-                city = group.city if group.city else 'N/A'
-            else:
-                group_domain = 'N/A'
-                group_description = 'N/A'
-                city = 'N/A'
-                logger.error(f"VKGroup with group_id {item.get('owner_id')} not found.")
+        google_sheet_file = settings.google_sheet_file
+        if not google_sheet_file:
+            print("Файл авторизации не найден.")
+            return
 
-            # Формируем ссылку на источник
-            if data_type == 'Post':
-                source_link = f"https://vk.com/{group_domain}?w=wall-{item.get('owner_id')}_{item.get('id')}"
-            elif data_type == 'Comment':
-                source_link = f"https://vk.com/{group_domain}?w=wall-{item.get('owner_id')}_{item.get('post_id')}&reply={item.get('id')}"
-            else:
-                source_link = 'N/A'
+        # Сохранение файла авторизации временно на диск
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.json') as temp_file:
+            temp_file.write(google_sheet_file.read())
+            temp_file_path = temp_file.name
 
-            # Формируем ссылку на профиль пользователя
-            profile_link = f"https://vk.com/id{item.get('from_id')}" if item.get('from_id') else 'N/A'
+        try:
+            # Авторизация в Google Sheets
+            scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+            creds = ServiceAccountCredentials.from_json_keyfile_name(temp_file_path, scope)
+            client = gspread.authorize(creds)
 
-            data = [
-                current_date_and_time,
-                publication_date,
-                data_type,
-                item.get('from_id'),
-                text,
-                source_link,
-                profile_link,
-                sheet_name,
-                "group_description",
+            # Открытие таблицы
+            spreadsheet = client.open(table_name)
+
+            # Работа с листом 'sheet_name' (например, 'Лист1') для всех данных
+            try:
+                worksheet1 = spreadsheet.worksheet(sheet_name)
+            except gspread.exceptions.WorksheetNotFound:
+                worksheet1 = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="20")
+
+            # Работа с листом 'Лист2' для фильтрованных данных
+            try:
+                worksheet2 = spreadsheet.worksheet('Лист2')
+            except gspread.exceptions.WorksheetNotFound:
+                worksheet2 = spreadsheet.add_worksheet(title='Лист2', rows="100", cols="20")
+
+            # Установка заголовков для листов, если они пусты
+            headers = [
+                'Дата и время выгрузки',
+                'Дата публикации',
+                'Тип контента',
+                'Текст сообщения',
+                'Ссылка на источник',
+                'Ссылка на профиль пользователя',
+                'Город'
             ]
-            save_to_google_sheet_worksheet(sheet, data)
-    else:
-        logger.warning(f"Skipping saving data because the spreadsheet '{sheet_name}' - '{sheet_type}' was not found.")
+            if data_type == 'Post':
+                headers.extend(['Название группы', 'Описание группы'])
+
+            headers_for_sheet2 = headers + ['Ключевые слова', 'Стоп-слова']
+
+            # Добавление заголовков, если они отсутствуют
+            if not worksheet1.row_values(1):
+                worksheet1.append_row(headers)
+            if not worksheet2.row_values(1):
+                worksheet2.append_row(headers_for_sheet2)
+
+            # Получение информации о группе из VK
+            group_info = vk.groups.getById(group_id=group_id, fields=['description', 'city'])[0]
+            group_name = group_info.get('name', 'Неизвестно')
+            group_description = group_info.get('description', 'Описание недоступно')
+            group_city = group_info.get('city', {}).get('title', 'Город группы неизвестен')
+
+            # Подготовка строк данных
+            rows_for_sheet1 = []
+            rows_for_sheet2 = []
+            unique_records = set()  # Множество для отслеживания уникальных записей для Лист2
+
+            if data:
+                for item in data:
+                    # Очистка текста
+                    text = clean_text(item.get('text', ''))
+
+                    # Получение города пользователя или группы
+                    user_city = 'Город неизвестен'
+                    profile_link = ''
+                    if item.get('from_id') and item['from_id'] > 0:  # от пользователя
+                        user_info = vk.users.get(user_ids=item['from_id'], fields=['city'])
+                        if user_info:
+                            user_city = user_info[0].get('city', {}).get('title', 'Город неизвестен')
+                        profile_link = f"https://vk.com/id{item['from_id']}"
+                    else:
+                        profile_link = f"https://vk.com/club{abs(item['owner_id'])}"  # от группы
+
+                    row = [
+                        timezone.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        datetime.fromtimestamp(item['date']).strftime('%Y-%m-%d %H:%M:%S'),
+                        'Пост' if data_type == 'Post' else 'Комментарий',
+                        text,  # Использование очищенного текста
+                        f"https://vk.com/wall{item['owner_id']}_{item['id']}" if data_type == 'Post' else f"https://vk.com/wall{item['owner_id']}_{item.get('post_id', '')}",
+                        profile_link,
+                        user_city if data_type == 'Comment' else group_city
+                    ]
+
+                    # Добавление имени и описания группы только для постов
+                    if data_type == 'Post':
+                        row.extend([group_name, group_description])
+
+                    # Всегда добавлять данные в Лист1
+                    rows_for_sheet1.append(row)
+
+                    # Проверка на фильтрацию и уникальность для Лист2
+                    if filter_text(text, key_words, stop_words):
+                        filtered_key_words = ', '.join([kw for kw in key_words if kw in text])
+                        filtered_stop_words = ', '.join([sw for sw in stop_words if sw in text])
+
+                        row_for_sheet2 = tuple(row + [filtered_key_words, filtered_stop_words])
+
+                        if row_for_sheet2 not in unique_records:
+                            rows_for_sheet2.append(list(row_for_sheet2))
+                            unique_records.add(row_for_sheet2)  # Добавление строки в уникальные записи
+
+                # Добавление данных в листы
+                if rows_for_sheet1:
+                    worksheet1.append_rows(rows_for_sheet1)
+                if rows_for_sheet2:
+                    worksheet2.append_rows(rows_for_sheet2)
+
+            print(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
+
+        finally:
+            # Удаление временного файла
+            os.remove(temp_file_path)
+
+    except SpreadsheetNotFound:
+        print(f"Файл '{table_name}' не найден. Убедитесь, что файл существует.")
+    except Exception as e:
+        print(f"Ошибка при сохранении данных в Google Sheets: {e}")
 
 
 def log_parsing_action(action):
     logger.info(action)
+
+
+def get_group_id_by_domain(domain):
+    try:
+        token = UserToken.objects.filter(requests_used__lt=F('daily_limit')).order_by('requests_used').first()
+        if not token:
+            print("Нет доступных токенов.")
+            return None
+
+        url = "https://api.vk.com/method/groups.getById"
+        params = {
+            'group_id': domain,
+            'access_token': token.access_token,
+            'v': '5.131',
+        }
+        response = requests.get(url, params=params).json()
+
+        token.requests_used += 1
+        token.save(update_fields=['requests_used', 'last_used'])
+
+        print(f"Ответ от VK API: {response}")
+        if 'response' in response and len(response['response']) > 0:
+            return response['response'][0]['id']
+        else:
+            print(f"Ошибка VK API: {response.get('error', 'Неизвестная ошибка')}")
+        return None
+    except Exception as e:
+        print(f"Ошибка при получении group_id: {e}")
+        return None
+
+
+def get_user_token():
+    tokens = UserToken.objects.filter(requests_used__lt=F('daily_limit'))
+    if tokens:
+        return tokens.first()  # Выбираем первый токен с доступным лимитом
+    else:
+        raise Exception("Нет доступных токенов с квотой")

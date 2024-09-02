@@ -1,73 +1,142 @@
-from huey.contrib.djhuey import periodic_task
-from django.utils.timezone import now
-
 from huey import crontab
+from huey.contrib.djhuey import task, periodic_task, db_task
+from datetime import datetime, timedelta
+from django.utils import timezone
 import vk_api
-from vk_api import VkApi
-
-from .models import VKGroup, ParsingSettings
-from .utils import filter_text, clean_text, save_to_google_sheet
-
 import logging
+from .models import ParsingSettings, VKGroup, Spam
+from .utils import save_to_google_sheet, filter_text, clean_text, get_user_token
 
 logger = logging.getLogger(__name__)
 
 
-@periodic_task(crontab(minute='*/1'))
-def run_parsing():
-    vk_session = VkApi(token='vk1.a.37iyXyLQFnyFy9jYaDRj3a7mGVpisZQe0qrpb4LJJjlETVR1ea6X1h5BZZyXKUnVfULdt8BwmgrqxbJCU1RfPFpOrNwVO_73z91_itahb8Jn368LE7rAn3TiqmV0XYmJ5rzlZrh4SlkKu3aCSlHrdw-IAFuNhIZyGq1qM11nJ5UkRuuuqELLIjtUzNR2u91G7KLJKnCjvSygeXRQAX6BOw')
-    vk = vk_session.get_api()
+@task()
+def parse_vk_data(setting_id):
+    try:
+        setting = ParsingSettings.objects.get(id=setting_id)
 
-    groups = VKGroup.objects.all()
+        interval = setting.interval
+        if interval > 0:
+            now = timezone.now()
+            last_run_time = now - timedelta(minutes=interval)
+        else:
+            last_run_time = timezone.now() - timedelta(minutes=1)
 
-    for group in groups:
-        settings = ParsingSettings.objects.get(group=group)
+        user_token = get_user_token()
+        vk_session = vk_api.VkApi(token=user_token.access_token)
+        vk = vk_session.get_api()
 
-        all_posts = []
-        filtered_posts = []
-        all_comments = []
-        filtered_comments = []
+        groups = VKGroup.objects.all()
 
-        if settings.post:
-            try:
-                posts = vk.wall.get(owner_id=-int(group.group_id), count=5)
-                all_posts.extend(posts['items'])
-            except vk_api.exceptions.ApiError as e:
-                logger.error(f"VK API Error fetching posts: {e}")
-                continue
+        spam_settings = Spam.objects.first()
 
-            for post in all_posts:
-                post_id = post['id']
+        for group in groups:
+            is_spam_group = spam_settings and group in spam_settings.groups.all()
 
-                if settings.comment:
+            all_posts = []
+            filtered_posts = []
+            all_comments = []
+            filtered_comments = []
+
+            if is_spam_group:
+                if setting.post:
                     try:
-                        comments = vk.wall.getComments(
-                            owner_id=-int(group.group_id), post_id=post_id
-                        )
-                        all_comments.extend(comments['items'])
+                        if setting.pars_from:
+                            start_date = datetime.combine(setting.pars_from, datetime.min.time())
+                            end_date = timezone.now()
+                            posts = vk.wall.get(owner_id=-int(group.group_id), count=100)
+                            all_posts.extend([post for post in posts['items'] if
+                                              datetime.fromtimestamp(post['date']) >= start_date])
+                        else:
+                            posts = vk.wall.get(owner_id=-int(group.group_id), count=10)
+                            all_posts.extend(posts['items'])
                     except vk_api.exceptions.ApiError as e:
-                        logger.error(f"VK API Error fetching comments: {e}")
+                        logger.error(f"Ошибка VK API при получении постов: {e}")
                         continue
 
-                    filtered_comments.extend([
-                        comment for comment in all_comments
-                        if filter_text(clean_text(comment['text']), settings.keywords.split(','),
-                                       settings.stopwords.split(','))
-                    ])
+                    for post in all_posts:
+                        post_id = post['id']
 
-                filtered_posts.extend([
-                    post for post in all_posts
-                    if filter_text(clean_text(post.get('text', '')), settings.keywords.split(','),
-                                   settings.stopwords.split(','))
-                ])
+                        if setting.comment:
+                            try:
+                                comments = vk.wall.getComments(
+                                    owner_id=-int(group.group_id), post_id=post_id
+                                )
+                                all_comments.extend(comments['items'])
+                            except vk_api.exceptions.ApiError as e:
+                                logger.error(f"Ошибка VK API при получении комментариев: {e}")
+                                continue
 
-        if settings.post:
-            save_to_google_sheet(group.name, 'Лист1', 'Post', all_posts)
-            save_to_google_sheet(group.name, 'Лист2', 'Post', filtered_posts)
+                            filtered_comments.extend([
+                                comment for comment in all_comments
+                                if filter_text(clean_text(comment['text']), setting.keywords.split(','),
+                                               setting.stopwords.split(','))
+                            ])
 
-        if settings.comment:
-            save_to_google_sheet(group.name, 'Лист1', 'Comment', all_comments)
-            save_to_google_sheet(group.name, 'Лист2', 'Comment', filtered_comments)
+                        filtered_posts.extend([
+                            post for post in all_posts
+                            if filter_text(clean_text(post.get('text', '')), setting.keywords.split(','),
+                                           setting.stopwords.split(','))
+                        ])
 
-        logger.info(f"Parsing completed for group: {group.name} at {now()}")
+            table_name = setting.table_name if setting.table_name else 'DefaultSheet'
 
+            if setting.post:
+                save_to_google_sheet(
+                    vk,
+                    table_name,
+                    'Лист1',
+                    'Post',
+                    all_posts,
+                    group.group_id,
+                    setting.keywords.split(','),
+                    setting.stopwords.split(',')
+                )
+                save_to_google_sheet(
+                    vk,
+                    table_name,
+                    'Лист2',
+                    'Post',
+                    filtered_posts,
+                    group.group_id,
+                    setting.keywords.split(','),
+                    setting.stopwords.split(',')
+                )
+
+            if setting.comment:
+                save_to_google_sheet(
+                    vk,
+                    table_name,
+                    'Лист1',
+                    'Comment',
+                    all_comments,
+                    group.group_id,
+                    setting.keywords.split(','),
+                    setting.stopwords.split(',')
+                )
+                save_to_google_sheet(
+                    vk,
+                    table_name,
+                    'Лист2',
+                    'Comment',
+                    filtered_comments,
+                    group.group_id,
+                    setting.keywords.split(','),
+                    setting.stopwords.split(',')
+                )
+
+            logger.info(f"Парсинг завершён для группы: {group.name} в {timezone.now()}")
+
+    except Exception as e:
+        logger.error(f"Ошибка в задаче parse_vk_data: {e}")
+
+
+@periodic_task(crontab(minute='*/5'))
+def schedule_parse_vk_data():
+    try:
+        settings = ParsingSettings.objects.all()
+        for setting in settings:
+            if setting.interval > 0:
+                parse_vk_data(setting.id)
+    except Exception as e:
+        logger.error(f"Ошибка в расписании задачи parse_vk_data: {e}")
