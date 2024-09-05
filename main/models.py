@@ -84,3 +84,4 @@ class Spam(SingletonModel):
     class Meta:
         verbose_name = "Спам"
         verbose_name_plural = "Спам"
+

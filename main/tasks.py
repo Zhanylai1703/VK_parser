@@ -7,6 +7,7 @@ import logging
 from .models import ParsingSettings, VKGroup, Spam
 from .utils import save_to_google_sheet, filter_text, clean_text, get_user_token
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
@@ -14,57 +15,48 @@ logger = logging.getLogger(__name__)
 def parse_vk_data(setting_id):
     try:
         setting = ParsingSettings.objects.get(id=setting_id)
-
-        interval = setting.interval
-        if interval > 0:
-            now = timezone.now()
-            last_run_time = now - timedelta(minutes=interval)
-        else:
-            last_run_time = timezone.now() - timedelta(minutes=1)
+        logger.info(f"Начат парсинг для настроек с ID {setting_id} - {timezone.now()}")
 
         user_token = get_user_token()
         vk_session = vk_api.VkApi(token=user_token.access_token)
         vk = vk_session.get_api()
 
         groups = VKGroup.objects.all()
-
         spam_settings = Spam.objects.first()
 
-        for group in groups:
-            is_spam_group = spam_settings and group in spam_settings.groups.all()
+        logger.info(f"Получено {len(groups)} групп для парсинга.")
 
+        for group in groups:
+            logger.info(f"Парсинг группы: {group.name} - {timezone.now()}")
             all_posts = []
             filtered_posts = []
             all_comments = []
             filtered_comments = []
 
-            if is_spam_group:
+            is_spam_group = spam_settings and group in spam_settings.groups.all()
+
+            if not is_spam_group:
+                logger.info(f"Группа {group.name} помечена как спам. Начало сбора данных.")
+
                 if setting.post:
                     try:
-                        if setting.pars_from:
-                            start_date = datetime.combine(setting.pars_from, datetime.min.time())
-                            end_date = timezone.now()
-                            posts = vk.wall.get(owner_id=-int(group.group_id), count=100)
-                            all_posts.extend([post for post in posts['items'] if
-                                              datetime.fromtimestamp(post['date']) >= start_date])
-                        else:
-                            posts = vk.wall.get(owner_id=-int(group.group_id), count=10)
-                            all_posts.extend(posts['items'])
+                        posts = vk.wall.get(owner_id=-int(group.group_id), count=10)
+                        logger.info(f"Полученные посты: {posts}")
+                        all_posts.extend(posts['items'])
+                        logger.info(f"Получено {len(all_posts)} постов для группы {group.name}.")
                     except vk_api.exceptions.ApiError as e:
-                        logger.error(f"Ошибка VK API при получении постов: {e}")
+                        logger.error(f"Ошибка VK API при получении постов для группы {group.name}: {e}")
                         continue
 
                     for post in all_posts:
                         post_id = post['id']
-
                         if setting.comment:
                             try:
-                                comments = vk.wall.getComments(
-                                    owner_id=-int(group.group_id), post_id=post_id
-                                )
+                                comments = vk.wall.getComments(owner_id=-int(group.group_id), post_id=post_id)
                                 all_comments.extend(comments['items'])
+                                logger.info(f"Получено {len(all_comments)} комментариев для поста {post_id}.")
                             except vk_api.exceptions.ApiError as e:
-                                logger.error(f"Ошибка VK API при получении комментариев: {e}")
+                                logger.error(f"Ошибка VK API при получении комментариев для поста {post_id}: {e}")
                                 continue
 
                             filtered_comments.extend([
@@ -79,64 +71,38 @@ def parse_vk_data(setting_id):
                                            setting.stopwords.split(','))
                         ])
 
+            # Сохранение данных
             table_name = setting.table_name if setting.table_name else 'DefaultSheet'
+            logger.info(f"Сохранение данных для группы {group.name} в таблицу '{table_name}'.")
+            logger.info(f"Сохраняемые посты для группы {group.name}: {all_posts}")
+            logger.info(f"Отфильтрованные посты для группы {group.name}: {filtered_posts}")
+            logger.info(f"Сохраняемые комментарии для группы {group.name}: {all_comments}")
+            logger.info(f"Отфильтрованные комментарии для группы {group.name}: {filtered_comments}")
 
             if setting.post:
-                save_to_google_sheet(
-                    vk,
-                    table_name,
-                    'Лист1',
-                    'Post',
-                    all_posts,
-                    group.group_id,
-                    setting.keywords.split(','),
-                    setting.stopwords.split(',')
-                )
-                save_to_google_sheet(
-                    vk,
-                    table_name,
-                    'Лист2',
-                    'Post',
-                    filtered_posts,
-                    group.group_id,
-                    setting.keywords.split(','),
-                    setting.stopwords.split(',')
-                )
+                save_to_google_sheet(vk, table_name, 'Лист1', 'Post', all_posts, group.group_id, setting.keywords.split(','), setting.stopwords.split(','))
+                save_to_google_sheet(vk, table_name, 'Лист2', 'Post', filtered_posts, group.group_id, setting.keywords.split(','), setting.stopwords.split(','))
 
             if setting.comment:
-                save_to_google_sheet(
-                    vk,
-                    table_name,
-                    'Лист1',
-                    'Comment',
-                    all_comments,
-                    group.group_id,
-                    setting.keywords.split(','),
-                    setting.stopwords.split(',')
-                )
-                save_to_google_sheet(
-                    vk,
-                    table_name,
-                    'Лист2',
-                    'Comment',
-                    filtered_comments,
-                    group.group_id,
-                    setting.keywords.split(','),
-                    setting.stopwords.split(',')
-                )
+                save_to_google_sheet(vk, table_name, 'Лист1', 'Comment', all_comments, group.group_id, setting.keywords.split(','), setting.stopwords.split(','))
+                save_to_google_sheet(vk, table_name, 'Лист2', 'Comment', filtered_comments, group.group_id, setting.keywords.split(','), setting.stopwords.split(','))
 
-            logger.info(f"Парсинг завершён для группы: {group.name} в {timezone.now()}")
+        logger.info(f"Завершен парсинг для настроек с ID {setting_id} - {timezone.now()}")
 
     except Exception as e:
-        logger.error(f"Ошибка в задаче parse_vk_data: {e}")
+        logger.error(f"Ошибка при парсинге данных с ID {setting_id}: {e}")
 
 
 @periodic_task(crontab(minute='*/5'))
 def schedule_parse_vk_data():
     try:
         settings = ParsingSettings.objects.all()
+        logger.info(f"Запуск расписания парсинга данных - {timezone.now()}. Найдено {len(settings)} настроек.")
+
         for setting in settings:
             if setting.interval > 0:
+                logger.info(f"Запуск парсинга данных для настроек с ID {setting.id}.")
                 parse_vk_data(setting.id)
+
     except Exception as e:
         logger.error(f"Ошибка в расписании задачи parse_vk_data: {e}")

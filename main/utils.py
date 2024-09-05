@@ -19,7 +19,7 @@ from main.models import VKGroup, UserToken, ParsingSettings
 
 logger = logging.getLogger(__name__)
 
-SERVICE_ACCOUNT_FILE = 'vk-parser-433009-8498dc375f0f.json'
+SERVICE_ACCOUNT_FILE = 'peaceful-bruin-432623-t7-cd1c10956dc7.json'
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 
 # Авторизация
@@ -39,8 +39,8 @@ def get_google_sheet(sheet_name):
 
     try:
         spreadsheet = client.open(sheet_name)
-        print(f"Найден существующий файл '{sheet_name}'")
-        print(f"URL файла: {spreadsheet.url}")
+        logger.info(f"Найден существующий файл '{sheet_name}'")
+        logger.info(f"URL файла: {spreadsheet.url}")
         return spreadsheet
     except gspread.exceptions.SpreadsheetNotFound:
         print(f"Файл '{sheet_name}' не найден. Убедитесь, что файл существует.")
@@ -87,15 +87,14 @@ def truncate_keywords(keywords):
 
 def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, key_words, stop_words):
     try:
-        # Получение настроек из базы данных (если используется)
         settings = ParsingSettings.objects.first()
         if not settings:
-            print("Настройки не найдены.")
+            logger.error("Настройки не найдены.")
             return
 
         google_sheet_file = settings.google_sheet_file
         if not google_sheet_file:
-            print("Файл авторизации не найден.")
+            logger.error("Файл авторизации не найден.")
             return
 
         # Сохранение файла авторизации временно на диск
@@ -112,13 +111,13 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
             # Открытие таблицы
             spreadsheet = client.open(table_name)
 
-            # Работа с листом 'sheet_name' (например, 'Лист1') для всех данных
+            # Работа с листом 'sheet_name'
             try:
                 worksheet1 = spreadsheet.worksheet(sheet_name)
             except gspread.exceptions.WorksheetNotFound:
                 worksheet1 = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="20")
 
-            # Работа с листом 'Лист2' для фильтрованных данных
+            # Работа с листом 'Лист2'
             try:
                 worksheet2 = spreadsheet.worksheet('Лист2')
             except gspread.exceptions.WorksheetNotFound:
@@ -139,11 +138,12 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
 
             headers_for_sheet2 = headers + ['Ключевые слова', 'Стоп-слова']
 
-            # Добавление заголовков, если они отсутствуют
             if not worksheet1.row_values(1):
                 worksheet1.append_row(headers)
+                logger.info(f"Добавлены заголовки для листа '{sheet_name}'.")
             if not worksheet2.row_values(1):
                 worksheet2.append_row(headers_for_sheet2)
+                logger.info("Добавлены заголовки для листа 'Лист2'.")
 
             # Получение информации о группе из VK
             group_info = vk.groups.getById(group_id=group_id, fields=['description', 'city'])[0]
@@ -189,7 +189,7 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
                     # Всегда добавлять данные в Лист1
                     rows_for_sheet1.append(row)
 
-                    # Проверка на фильтрацию и уникальность для Лист2
+                    # Фильтрация и уникальность
                     if filter_text(text, key_words, stop_words):
                         filtered_key_words = ', '.join([kw for kw in key_words if kw in text])
                         filtered_stop_words = ', '.join([sw for sw in stop_words if sw in text])
@@ -200,22 +200,26 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
                             rows_for_sheet2.append(list(row_for_sheet2))
                             unique_records.add(row_for_sheet2)  # Добавление строки в уникальные записи
 
+                # Логирование количества данных перед добавлением
+                logger.info(f"Добавляется {len(rows_for_sheet1)} строк(и) в лист '{sheet_name}'.")
+                logger.info(f"Добавляется {len(rows_for_sheet2)} строк(и) в лист 'Лист2'.")
+
                 # Добавление данных в листы
                 if rows_for_sheet1:
                     worksheet1.append_rows(rows_for_sheet1)
                 if rows_for_sheet2:
                     worksheet2.append_rows(rows_for_sheet2)
 
-            print(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
+            logger.info(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
 
         finally:
             # Удаление временного файла
             os.remove(temp_file_path)
 
     except SpreadsheetNotFound:
-        print(f"Файл '{table_name}' не найден. Убедитесь, что файл существует.")
+        logger.error(f"Файл '{table_name}' не найден. Убедитесь, что файл существует.")
     except Exception as e:
-        print(f"Ошибка при сохранении данных в Google Sheets: {e}")
+        logger.error(f"Ошибка при сохранении данных в Google Sheets: {e}")
 
 
 def log_parsing_action(action):
