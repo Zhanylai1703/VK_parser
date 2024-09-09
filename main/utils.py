@@ -65,20 +65,21 @@ def save_to_google_sheet_worksheet(worksheet, data):
 
 
 def filter_text(text, key_words, stop_words):
+    """
+    Фильтрует текст, проверяя наличие ключевых и стоп-слов.
+    Возвращает найденные ключевые и стоп-слова в виде списков.
+    """
     key_words = truncate_keywords(key_words)
-    key_words_regex = '|'.join(re.escape(word) for word in key_words)
-    stop_words_regex = '|'.join(re.escape(word) for word in stop_words)
 
-    has_key_words = bool(re.search(key_words_regex, text, re.IGNORECASE))
-    has_stop_words = bool(re.search(stop_words_regex, text, re.IGNORECASE))
+    # Приведение текста и ключевых/стоп-слов к нижнему регистру для корректного сравнения
+    text = text.lower()
+    key_words = [kw.lower().strip() for kw in key_words]
+    stop_words = [sw.lower().strip() for sw in stop_words]
 
-    if has_key_words and has_stop_words:
-        return 'key_and_stop'
-    elif has_key_words:
-        return 'key_only'
-    elif has_stop_words:
-        return 'stop_only'
-    return 'none'
+    found_key_words = [kw for kw in key_words if kw in text]
+    found_stop_words = [sw for sw in stop_words if sw in text]
+
+    return found_key_words, found_stop_words
 
 
 def clean_text(text):
@@ -104,29 +105,41 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
             logger.error("Файл авторизации не найден.")
             return
 
+        # Сохранение файла авторизации временно на диск
         with tempfile.NamedTemporaryFile(delete=False, suffix='.json') as temp_file:
             temp_file.write(google_sheet_file.read())
             temp_file_path = temp_file.name
 
         try:
+            # Авторизация в Google Sheets
             scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
             creds = ServiceAccountCredentials.from_json_keyfile_name(temp_file_path, scope)
             client = gspread.authorize(creds)
+
+            # Открытие таблицы
             spreadsheet = client.open(table_name)
 
+            # Работа с листом 'sheet_name'
             try:
                 worksheet1 = spreadsheet.worksheet(sheet_name)
             except gspread.exceptions.WorksheetNotFound:
                 worksheet1 = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="20")
 
+            # Работа с листом 'Лист2'
             try:
                 worksheet2 = spreadsheet.worksheet('Лист2')
             except gspread.exceptions.WorksheetNotFound:
                 worksheet2 = spreadsheet.add_worksheet(title='Лист2', rows="100", cols="20")
 
+            # Установка заголовков для листов, если они пусты
             headers = [
-                'Дата и время выгрузки', 'Дата публикации', 'Тип контента',
-                'Текст сообщения', 'Ссылка на источник', 'Ссылка на профиль пользователя', 'Город'
+                'Дата и время выгрузки',
+                'Дата публикации',
+                'Тип контента',
+                'Текст сообщения',
+                'Ссылка на источник',
+                'Ссылка на профиль пользователя',
+                'Город'
             ]
             if data_type == 'Post':
                 headers.extend(['Название группы', 'Описание группы'])
@@ -140,118 +153,83 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
                 worksheet2.append_row(headers_for_sheet2)
                 logger.info("Добавлены заголовки для листа 'Лист2'.")
 
+            # Определение последней заполненной строки
+            last_row_sheet1 = len(worksheet1.get_all_values()) + 1
+            last_row_sheet2 = len(worksheet2.get_all_values()) + 1
+
+            # Получение информации о группе из VK
             group_info = vk.groups.getById(group_id=group_id, fields=['description', 'city'])[0]
             group_name = group_info.get('name', 'Неизвестно')
             group_description = group_info.get('description', 'Описание недоступно')
             group_city = group_info.get('city', {}).get('title', 'Город группы неизвестен')
 
-            rows_key_only = []
-            rows_key_and_stop = []
-            rows_stop_only = []
+            # Подготовка строк данных
+            rows_for_sheet1 = []
+            rows_for_sheet2 = []
+            unique_records = set()  # Множество для отслеживания уникальных записей для Лист2
 
             if data:
                 for item in data:
-                    if 'date' not in item:
-                        continue  # Пропустить элемент без даты
-
+                    # Очистка текста
                     text = clean_text(item.get('text', ''))
+
+                    # Получение города пользователя или группы
                     user_city = 'Город неизвестен'
                     profile_link = ''
-                    if item.get('from_id') and item['from_id'] > 0:
+                    if item.get('from_id') and item['from_id'] > 0:  # от пользователя
                         user_info = vk.users.get(user_ids=item['from_id'], fields=['city'])
                         if user_info:
                             user_city = user_info[0].get('city', {}).get('title', 'Город неизвестен')
                         profile_link = f"https://vk.com/id{item['from_id']}"
                     else:
-                        profile_link = f"https://vk.com/club{abs(item['owner_id'])}"
+                        profile_link = f"https://vk.com/club{abs(item['owner_id'])}"  # от группы
 
                     row = [
                         timezone.now().strftime('%Y-%m-%d %H:%M:%S'),
                         datetime.fromtimestamp(item['date']).strftime('%Y-%m-%d %H:%M:%S'),
                         'Пост' if data_type == 'Post' else 'Комментарий',
-                        text,
+                        text,  # Использование очищенного текста
                         f"https://vk.com/wall{item['owner_id']}_{item['id']}" if data_type == 'Post' else f"https://vk.com/wall{item['owner_id']}_{item.get('post_id', '')}",
                         profile_link,
                         user_city if data_type == 'Comment' else group_city
                     ]
 
+                    # Добавление имени и описания группы только для постов
                     if data_type == 'Post':
                         row.extend([group_name, group_description])
 
-                    filter_type = filter_text(text, key_words, stop_words)
+                    # Всегда добавлять данные в Лист1
+                    rows_for_sheet1.append(row)
 
-                    filtered_key_words = ', '.join([kw for kw in key_words if kw.lower() in text.lower()])
-                    filtered_stop_words = ', '.join([sw for sw in stop_words if sw.lower() in text.lower()])
+                    # Фильтрация и уникальность
+                    found_key_words, found_stop_words = filter_text(text, key_words, stop_words)
+                    if found_key_words:  # Сохраняем только если найдены ключевые слова
+                        filtered_key_words = ', '.join(found_key_words)
+                        filtered_stop_words = ', '.join(found_stop_words)
 
-                    row_for_sheet2 = row + [filtered_key_words, filtered_stop_words]
+                        row_for_sheet2 = tuple(row + [filtered_key_words, filtered_stop_words])
 
-                    if filter_type == 'key_only':
-                        rows_key_only.append(row)
-                    elif filter_type == 'key_and_stop':
-                        rows_key_and_stop.append(row_for_sheet2)
-                    elif filter_type == 'stop_only':
-                        rows_stop_only.append(row_for_sheet2)
+                        if row_for_sheet2 not in unique_records:
+                            rows_for_sheet2.append(list(row_for_sheet2))
+                            unique_records.add(row_for_sheet2)  # Добавление строки в уникальные записи
 
-            if rows_key_only or rows_key_and_stop or rows_stop_only:
-                last_row_sheet1 = len(worksheet1.get_all_values()) + 1
-                last_row_sheet2 = len(worksheet2.get_all_values()) + 1
+                # Логирование количества данных перед добавлением
+                logger.info(f"Добавляется {len(rows_for_sheet1)} строк(и) в лист '{sheet_name}'.")
+                logger.info(f"Добавляется {len(rows_for_sheet2)} строк(и) в лист 'Лист2'.")
 
-                all_rows = rows_key_only + rows_key_and_stop + rows_stop_only
-                if all_rows:
-                    worksheet1.insert_rows(all_rows, row=last_row_sheet1)
-                ordered_rows_for_sheet2 = rows_key_and_stop + rows_stop_only
-                if ordered_rows_for_sheet2:
-                    worksheet2.insert_rows(ordered_rows_for_sheet2, row=last_row_sheet2)
-
-                # Use Google Sheets API to update text wrapping
-                service = build('sheets', 'v4', credentials=creds)
-                requests = [
-                    {
-                        "repeatCell": {
-                            "range": {
-                                "sheetId": worksheet1.id,
-                                "startRowIndex": 0,
-                                "endRowIndex": len(all_rows) + 1,
-                                "startColumnIndex": 0,
-                                "endColumnIndex": len(headers),
-                            },
-                            "cell": {
-                                "userEnteredFormat": {
-                                    "wrapStrategy": "WRAP"
-                                }
-                            },
-                            "fields": "userEnteredFormat.wrapStrategy"
-                        }
-                    },
-                    {
-                        "repeatCell": {
-                            "range": {
-                                "sheetId": worksheet2.id,
-                                "startRowIndex": 0,
-                                "endRowIndex": len(ordered_rows_for_sheet2) + 1,
-                                "startColumnIndex": 0,
-                                "endColumnIndex": len(headers_for_sheet2),
-                            },
-                            "cell": {
-                                "userEnteredFormat": {
-                                    "wrapStrategy": "WRAP"
-                                }
-                            },
-                            "fields": "userEnteredFormat.wrapStrategy"
-                        }
-                    }
-                ]
-                body = {
-                    'requests': requests
-                }
-                service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet.id, body=body).execute()
+                # Добавление данных в листы, начиная с последней заполненной строки
+                if rows_for_sheet1:
+                    worksheet1.insert_rows(rows_for_sheet1, row=last_row_sheet1)
+                if rows_for_sheet2:
+                    worksheet2.insert_rows(rows_for_sheet2, row=last_row_sheet2)
 
             logger.info(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
 
         finally:
+            # Удаление временного файла
             os.remove(temp_file_path)
 
-    except gspread.exceptions.SpreadsheetNotFound:
+    except SpreadsheetNotFound:
         logger.error(f"Файл '{table_name}' не найден. Убедитесь, что файл существует.")
     except Exception as e:
         logger.error(f"Ошибка при сохранении данных в Google Sheets: {e}")

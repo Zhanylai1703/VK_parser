@@ -43,7 +43,7 @@ def parse_vk_data(setting_id):
 
                 if setting.post:
                     try:
-                        posts = vk.wall.get(owner_id=-int(group.group_id), count=10)
+                        posts = vk.wall.get(owner_id=-int(group.group_id), count=20)
                         logger.info(f"Полученные посты: {posts}")
                         for post in posts['items']:
                             post_date = datetime.fromtimestamp(post['date']).date()
@@ -70,30 +70,34 @@ def parse_vk_data(setting_id):
                                 logger.error(f"Ошибка VK API при получении комментариев для поста {post_id}: {e}")
                                 continue
 
-                    save_to_google_sheet(vk, setting.table_name, 'Лист1', 'Post', all_posts, group.group_id, setting.keywords, setting.stopwords)
-                    save_to_google_sheet(vk, setting.table_name, 'Лист2', 'Post', filtered_posts, group.group_id, setting.keywords, setting.stopwords)
+                            filtered_comments.extend([
+                                comment for comment in all_comments
+                                if filter_text(clean_text(comment['text']), setting.keywords.split(','),
+                                               setting.stopwords.split(','))
+                            ])
 
-                if setting.comment:
-                    try:
-                        comments = vk.wall.getComments(owner_id=-int(group.group_id), count=10)
-                        logger.info(f"Полученные комментарии: {comments}")
-                        for comment in comments['items']:
-                            comment_date = datetime.fromtimestamp(comment['date']).date()
-                            # Проверка даты (с этой даты)
-                            if comment_date >= pars_from_date:
-                                filtered_comments.append(comment)
-                        logger.info(f"Получено {len(filtered_comments)} комментариев для группы {group.name}.")
-                    except vk_api.exceptions.ApiError as e:
-                        logger.error(f"Ошибка VK API при получении комментариев для группы {group.name}: {e}")
-                        continue
+                        filtered_posts.extend([
+                            post for post in all_posts
+                            if filter_text(clean_text(post.get('text', '')), setting.keywords.split(','),
+                                           setting.stopwords.split(','))
+                        ])
 
-                    save_to_google_sheet(vk, setting.table_name, 'Лист1', 'Comment', all_comments, group.group_id, setting.key_words, setting.stop_words)
-                    save_to_google_sheet(vk, setting.table_name, 'Лист2', 'Comment', filtered_comments, group.group_id, setting.key_words, setting.stop_words)
+            # Сохранение данных
+            table_name = setting.table_name if setting.table_name else 'DefaultSheet'
+            logger.info(f"Сохранение данных для группы {group.name} в таблицу '{table_name}'.")
 
-    except ParsingSettings.DoesNotExist:
-        logger.error(f"Настройки с ID {setting_id} не найдены.")
+            if setting.post:
+                save_to_google_sheet(vk, table_name, 'Лист1', 'Post', all_posts, group.group_id, setting.keywords.split(','), setting.stopwords.split(','))
+                save_to_google_sheet(vk, table_name, 'Лист2', 'Post', filtered_posts, group.group_id, setting.keywords.split(','), setting.stopwords.split(','))
+
+            if setting.comment:
+                save_to_google_sheet(vk, table_name, 'Лист1', 'Comment', all_comments, group.group_id, setting.keywords.split(','), setting.stopwords.split(','))
+                save_to_google_sheet(vk, table_name, 'Лист2', 'Comment', filtered_comments, group.group_id, setting.keywords.split(','), setting.stopwords.split(','))
+
+        logger.info(f"Завершен парсинг для настроек с ID {setting_id} - {timezone.now()}")
+
     except Exception as e:
-        logger.error(f"Ошибка при парсинге данных: {e}")
+        logger.error(f"Ошибка при парсинге данных с ID {setting_id}: {e}")
 
 
 @periodic_task(crontab(minute='*/5'))
