@@ -69,8 +69,8 @@ def filter_text(text, key_words, stop_words):
     key_words_regex = '|'.join(re.escape(word) for word in key_words)
     stop_words_regex = '|'.join(re.escape(word) for word in stop_words)
 
-    has_key_words = bool(re.search(key_words_regex, text))
-    has_stop_words = bool(re.search(stop_words_regex, text))
+    has_key_words = bool(re.search(key_words_regex, text, re.IGNORECASE))
+    has_stop_words = bool(re.search(stop_words_regex, text, re.IGNORECASE))
 
     if has_key_words and has_stop_words:
         return 'key_and_stop'
@@ -148,7 +148,6 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
             rows_key_only = []
             rows_key_and_stop = []
             rows_stop_only = []
-            unique_records = set()
 
             if data:
                 for item in data:
@@ -178,8 +177,8 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
 
                     filter_type = filter_text(text, key_words, stop_words)
 
-                    filtered_key_words = ', '.join([kw for kw in key_words if kw in text])
-                    filtered_stop_words = ', '.join([sw for sw in stop_words if sw in text])
+                    filtered_key_words = ', '.join([kw for kw in key_words if kw.lower() in text.lower()])
+                    filtered_stop_words = ', '.join([sw for sw in stop_words if sw.lower() in text.lower()])
 
                     row_for_sheet2 = row + [filtered_key_words, filtered_stop_words]
 
@@ -210,7 +209,7 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
                             "range": {
                                 "sheetId": worksheet1.id,
                                 "startRowIndex": 0,
-                                "endRowIndex": len(all_rows),
+                                "endRowIndex": len(all_rows) + 1,
                                 "startColumnIndex": 0,
                                 "endColumnIndex": len(headers),
                             },
@@ -227,7 +226,7 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
                             "range": {
                                 "sheetId": worksheet2.id,
                                 "startRowIndex": 0,
-                                "endRowIndex": len(ordered_rows_for_sheet2),
+                                "endRowIndex": len(ordered_rows_for_sheet2) + 1,
                                 "startColumnIndex": 0,
                                 "endColumnIndex": len(headers_for_sheet2),
                             },
