@@ -184,25 +184,23 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
                     row_for_sheet2 = row + [filtered_key_words, filtered_stop_words]
 
                     if filter_type == 'key_only':
-                        rows_key_only.append(row_for_sheet2)
+                        rows_key_only.append(row)
                     elif filter_type == 'key_and_stop':
                         rows_key_and_stop.append(row_for_sheet2)
                     elif filter_type == 'stop_only':
                         rows_stop_only.append(row_for_sheet2)
 
-            last_row_sheet1 = len(worksheet1.get_all_values()) + 1
-            last_row_sheet2 = len(worksheet2.get_all_values()) + 1
-
-            ordered_rows_for_sheet2 = rows_key_only + rows_key_and_stop + rows_stop_only
-
-            logger.info(
-                f"Добавляется {len(ordered_rows_for_sheet2)} строк(и) в лист 'Лист2' начиная с {last_row_sheet2}.")
-
-            if ordered_rows_for_sheet2:
-                worksheet2.insert_rows(ordered_rows_for_sheet2, row=last_row_sheet2)
-
             if rows_key_only or rows_key_and_stop or rows_stop_only:
-                worksheet1.insert_rows(rows_key_only + rows_key_and_stop + rows_stop_only, row=last_row_sheet1)
+                last_row_sheet1 = len(worksheet1.get_all_values()) + 1
+                last_row_sheet2 = len(worksheet2.get_all_values()) + 1
+
+                ordered_rows_for_sheet2 = rows_key_only + rows_key_and_stop + rows_stop_only
+                if ordered_rows_for_sheet2:
+                    worksheet2.insert_rows(ordered_rows_for_sheet2, row=last_row_sheet2)
+
+                all_rows = rows_key_only + rows_key_and_stop + rows_stop_only
+                if all_rows:
+                    worksheet1.insert_rows(all_rows, row=last_row_sheet1)
 
             logger.info(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
 
