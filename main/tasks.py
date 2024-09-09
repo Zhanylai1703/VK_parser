@@ -70,8 +70,8 @@ def parse_vk_data(setting_id):
                                 logger.error(f"Ошибка VK API при получении комментариев для поста {post_id}: {e}")
                                 continue
 
-                    save_to_google_sheet(vk, setting.table_name, 'Лист1', 'Post', all_posts, group.group_id, setting.key_words, setting.stop_words)
-                    save_to_google_sheet(vk, setting.table_name, 'Лист2', 'Post', filtered_posts, group.group_id, setting.key_words, setting.stop_words)
+                    save_to_google_sheet(vk, setting.table_name, 'Лист1', 'Post', all_posts, group.group_id, setting.keywords, setting.stopwords)
+                    save_to_google_sheet(vk, setting.table_name, 'Лист2', 'Post', filtered_posts, group.group_id, setting.keywords, setting.stopwords)
 
                 if setting.comment:
                     try:

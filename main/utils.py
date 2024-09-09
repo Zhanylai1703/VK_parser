@@ -151,6 +151,9 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
 
             if data:
                 for item in data:
+                    if 'date' not in item:
+                        continue  # Пропустить элемент без даты
+
                     text = clean_text(item.get('text', ''))
                     user_city = 'Город неизвестен'
                     profile_link = ''
@@ -195,7 +198,7 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
 
                 all_rows = rows_key_only + rows_key_and_stop + rows_stop_only
                 if all_rows:
-                    worksheet1.insert_rows(rows_key_only + rows_key_and_stop + rows_stop_only, row=last_row_sheet1)
+                    worksheet1.insert_rows(all_rows, row=last_row_sheet1)
                 ordered_rows_for_sheet2 = rows_key_and_stop + rows_stop_only
                 if ordered_rows_for_sheet2:
                     worksheet2.insert_rows(ordered_rows_for_sheet2, row=last_row_sheet2)
