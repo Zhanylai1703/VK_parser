@@ -193,13 +193,12 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
                 last_row_sheet1 = len(worksheet1.get_all_values()) + 1
                 last_row_sheet2 = len(worksheet2.get_all_values()) + 1
 
-                ordered_rows_for_sheet2 = rows_key_only + rows_key_and_stop + rows_stop_only
-                if ordered_rows_for_sheet2:
-                    worksheet2.insert_rows(ordered_rows_for_sheet2, row=last_row_sheet2)
-
                 all_rows = rows_key_only + rows_key_and_stop + rows_stop_only
                 if all_rows:
-                    worksheet1.insert_rows(all_rows, row=last_row_sheet1)
+                    worksheet1.insert_rows(rows_key_only + rows_key_and_stop + rows_stop_only, row=last_row_sheet1)
+                ordered_rows_for_sheet2 = rows_key_and_stop + rows_stop_only
+                if ordered_rows_for_sheet2:
+                    worksheet2.insert_rows(ordered_rows_for_sheet2, row=last_row_sheet2)
 
                 # Use Google Sheets API to update text wrapping
                 service = build('sheets', 'v4', credentials=creds)
