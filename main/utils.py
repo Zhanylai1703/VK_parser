@@ -202,12 +202,55 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
                 if all_rows:
                     worksheet1.insert_rows(all_rows, row=last_row_sheet1)
 
+                # Use Google Sheets API to update text wrapping
+                service = build('sheets', 'v4', credentials=creds)
+                requests = [
+                    {
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": worksheet1.id,
+                                "startRowIndex": 0,
+                                "endRowIndex": len(all_rows),
+                                "startColumnIndex": 0,
+                                "endColumnIndex": len(headers),
+                            },
+                            "cell": {
+                                "userEnteredFormat": {
+                                    "wrapStrategy": "WRAP"
+                                }
+                            },
+                            "fields": "userEnteredFormat.wrapStrategy"
+                        }
+                    },
+                    {
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": worksheet2.id,
+                                "startRowIndex": 0,
+                                "endRowIndex": len(ordered_rows_for_sheet2),
+                                "startColumnIndex": 0,
+                                "endColumnIndex": len(headers_for_sheet2),
+                            },
+                            "cell": {
+                                "userEnteredFormat": {
+                                    "wrapStrategy": "WRAP"
+                                }
+                            },
+                            "fields": "userEnteredFormat.wrapStrategy"
+                        }
+                    }
+                ]
+                body = {
+                    'requests': requests
+                }
+                service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet.id, body=body).execute()
+
             logger.info(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
 
         finally:
             os.remove(temp_file_path)
 
-    except SpreadsheetNotFound:
+    except gspread.exceptions.SpreadsheetNotFound:
         logger.error(f"Файл '{table_name}' не найден. Убедитесь, что файл существует.")
     except Exception as e:
         logger.error(f"Ошибка при сохранении данных в Google Sheets: {e}")
