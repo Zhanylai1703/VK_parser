@@ -24,7 +24,10 @@ def parse_vk_data(setting_id):
         groups = VKGroup.objects.all()
         spam_settings = Spam.objects.first()
 
-        logger.info(f"Получено {len(groups)} групп для парсинга.")
+        # Определение даты начала парсинга
+        pars_from_date = setting.pars_from or timezone.now().date()
+
+        logger.info(f"Парсинг данных начиная с {pars_from_date}")
 
         for group in groups:
             logger.info(f"Парсинг группы: {group.name} - {timezone.now()}")
@@ -42,7 +45,11 @@ def parse_vk_data(setting_id):
                     try:
                         posts = vk.wall.get(owner_id=-int(group.group_id), count=10)
                         logger.info(f"Полученные посты: {posts}")
-                        all_posts.extend(posts['items'])
+                        for post in posts['items']:
+                            post_date = datetime.fromtimestamp(post['date']).date()
+                            # Проверка даты (с этой даты)
+                            if post_date >= pars_from_date:
+                                all_posts.append(post)
                         logger.info(f"Получено {len(all_posts)} постов для группы {group.name}.")
                     except vk_api.exceptions.ApiError as e:
                         logger.error(f"Ошибка VK API при получении постов для группы {group.name}: {e}")
@@ -53,7 +60,11 @@ def parse_vk_data(setting_id):
                         if setting.comment:
                             try:
                                 comments = vk.wall.getComments(owner_id=-int(group.group_id), post_id=post_id)
-                                all_comments.extend(comments['items'])
+                                for comment in comments['items']:
+                                    comment_date = datetime.fromtimestamp(comment['date']).date()
+                                    # Проверка даты (с этой даты)
+                                    if comment_date >= pars_from_date:
+                                        all_comments.append(comment)
                                 logger.info(f"Получено {len(all_comments)} комментариев для поста {post_id}.")
                             except vk_api.exceptions.ApiError as e:
                                 logger.error(f"Ошибка VK API при получении комментариев для поста {post_id}: {e}")
@@ -74,10 +85,6 @@ def parse_vk_data(setting_id):
             # Сохранение данных
             table_name = setting.table_name if setting.table_name else 'DefaultSheet'
             logger.info(f"Сохранение данных для группы {group.name} в таблицу '{table_name}'.")
-            logger.info(f"Сохраняемые посты для группы {group.name}: {all_posts}")
-            logger.info(f"Отфильтрованные посты для группы {group.name}: {filtered_posts}")
-            logger.info(f"Сохраняемые комментарии для группы {group.name}: {all_comments}")
-            logger.info(f"Отфильтрованные комментарии для группы {group.name}: {filtered_comments}")
 
             if setting.post:
                 save_to_google_sheet(vk, table_name, 'Лист1', 'Post', all_posts, group.group_id, setting.keywords.split(','), setting.stopwords.split(','))
