@@ -69,9 +69,16 @@ def filter_text(text, key_words, stop_words):
     key_words_regex = '|'.join(re.escape(word) for word in key_words)
     stop_words_regex = '|'.join(re.escape(word) for word in stop_words)
 
-    if re.search(key_words_regex, text) and not re.search(stop_words_regex, text):
-        return True
-    return False
+    has_key_words = bool(re.search(key_words_regex, text))
+    has_stop_words = bool(re.search(stop_words_regex, text))
+
+    if has_key_words and has_stop_words:
+        return 'key_and_stop'
+    elif has_key_words:
+        return 'key_only'
+    elif has_stop_words:
+        return 'stop_only'
+    return 'none'
 
 
 def clean_text(text):
@@ -97,41 +104,29 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
             logger.error("Файл авторизации не найден.")
             return
 
-        # Сохранение файла авторизации временно на диск
         with tempfile.NamedTemporaryFile(delete=False, suffix='.json') as temp_file:
             temp_file.write(google_sheet_file.read())
             temp_file_path = temp_file.name
 
         try:
-            # Авторизация в Google Sheets
             scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
             creds = ServiceAccountCredentials.from_json_keyfile_name(temp_file_path, scope)
             client = gspread.authorize(creds)
-
-            # Открытие таблицы
             spreadsheet = client.open(table_name)
 
-            # Работа с листом 'sheet_name'
             try:
                 worksheet1 = spreadsheet.worksheet(sheet_name)
             except gspread.exceptions.WorksheetNotFound:
                 worksheet1 = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="20")
 
-            # Работа с листом 'Лист2'
             try:
                 worksheet2 = spreadsheet.worksheet('Лист2')
             except gspread.exceptions.WorksheetNotFound:
                 worksheet2 = spreadsheet.add_worksheet(title='Лист2', rows="100", cols="20")
 
-            # Установка заголовков для листов, если они пусты
             headers = [
-                'Дата и время выгрузки',
-                'Дата публикации',
-                'Тип контента',
-                'Текст сообщения',
-                'Ссылка на источник',
-                'Ссылка на профиль пользователя',
-                'Город'
+                'Дата и время выгрузки', 'Дата публикации', 'Тип контента',
+                'Текст сообщения', 'Ссылка на источник', 'Ссылка на профиль пользователя', 'Город'
             ]
             if data_type == 'Post':
                 headers.extend(['Название группы', 'Описание группы'])
@@ -145,75 +140,73 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
                 worksheet2.append_row(headers_for_sheet2)
                 logger.info("Добавлены заголовки для листа 'Лист2'.")
 
-            # Получение информации о группе из VK
             group_info = vk.groups.getById(group_id=group_id, fields=['description', 'city'])[0]
             group_name = group_info.get('name', 'Неизвестно')
             group_description = group_info.get('description', 'Описание недоступно')
             group_city = group_info.get('city', {}).get('title', 'Город группы неизвестен')
 
-            # Подготовка строк данных
-            rows_for_sheet1 = []
-            rows_for_sheet2 = []
-            unique_records = set()  # Множество для отслеживания уникальных записей для Лист2
+            rows_key_only = []
+            rows_key_and_stop = []
+            rows_stop_only = []
+            unique_records = set()
 
             if data:
                 for item in data:
-                    # Очистка текста
                     text = clean_text(item.get('text', ''))
-
-                    # Получение города пользователя или группы
                     user_city = 'Город неизвестен'
                     profile_link = ''
-                    if item.get('from_id') and item['from_id'] > 0:  # от пользователя
+                    if item.get('from_id') and item['from_id'] > 0:
                         user_info = vk.users.get(user_ids=item['from_id'], fields=['city'])
                         if user_info:
                             user_city = user_info[0].get('city', {}).get('title', 'Город неизвестен')
                         profile_link = f"https://vk.com/id{item['from_id']}"
                     else:
-                        profile_link = f"https://vk.com/club{abs(item['owner_id'])}"  # от группы
+                        profile_link = f"https://vk.com/club{abs(item['owner_id'])}"
 
                     row = [
                         timezone.now().strftime('%Y-%m-%d %H:%M:%S'),
                         datetime.fromtimestamp(item['date']).strftime('%Y-%m-%d %H:%M:%S'),
                         'Пост' if data_type == 'Post' else 'Комментарий',
-                        text,  # Использование очищенного текста
+                        text,
                         f"https://vk.com/wall{item['owner_id']}_{item['id']}" if data_type == 'Post' else f"https://vk.com/wall{item['owner_id']}_{item.get('post_id', '')}",
                         profile_link,
                         user_city if data_type == 'Comment' else group_city
                     ]
 
-                    # Добавление имени и описания группы только для постов
                     if data_type == 'Post':
                         row.extend([group_name, group_description])
 
-                    # Всегда добавлять данные в Лист1
-                    rows_for_sheet1.append(row)
+                    filter_type = filter_text(text, key_words, stop_words)
 
-                    # Фильтрация и уникальность
-                    if filter_text(text, key_words, stop_words):
-                        filtered_key_words = ', '.join([kw for kw in key_words if kw in text])
-                        filtered_stop_words = ', '.join([sw for sw in stop_words if sw in text])
+                    filtered_key_words = ', '.join([kw for kw in key_words if kw in text])
+                    filtered_stop_words = ', '.join([sw for sw in stop_words if sw in text])
 
-                        row_for_sheet2 = tuple(row + [filtered_key_words, filtered_stop_words])
+                    row_for_sheet2 = row + [filtered_key_words, filtered_stop_words]
 
-                        if row_for_sheet2 not in unique_records:
-                            rows_for_sheet2.append(list(row_for_sheet2))
-                            unique_records.add(row_for_sheet2)  # Добавление строки в уникальные записи
+                    if filter_type == 'key_only':
+                        rows_key_only.append(row_for_sheet2)
+                    elif filter_type == 'key_and_stop':
+                        rows_key_and_stop.append(row_for_sheet2)
+                    elif filter_type == 'stop_only':
+                        rows_stop_only.append(row_for_sheet2)
 
-                # Логирование количества данных перед добавлением
-                logger.info(f"Добавляется {len(rows_for_sheet1)} строк(и) в лист '{sheet_name}'.")
-                logger.info(f"Добавляется {len(rows_for_sheet2)} строк(и) в лист 'Лист2'.")
+            last_row_sheet1 = len(worksheet1.get_all_values()) + 1
+            last_row_sheet2 = len(worksheet2.get_all_values()) + 1
 
-                # Добавление данных в листы
-                if rows_for_sheet1:
-                    worksheet1.append_rows(rows_for_sheet1)
-                if rows_for_sheet2:
-                    worksheet2.append_rows(rows_for_sheet2)
+            ordered_rows_for_sheet2 = rows_key_only + rows_key_and_stop + rows_stop_only
+
+            logger.info(
+                f"Добавляется {len(ordered_rows_for_sheet2)} строк(и) в лист 'Лист2' начиная с {last_row_sheet2}.")
+
+            if ordered_rows_for_sheet2:
+                worksheet2.insert_rows(ordered_rows_for_sheet2, row=last_row_sheet2)
+
+            if rows_key_only or rows_key_and_stop or rows_stop_only:
+                worksheet1.insert_rows(rows_key_only + rows_key_and_stop + rows_stop_only, row=last_row_sheet1)
 
             logger.info(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
 
         finally:
-            # Удаление временного файла
             os.remove(temp_file_path)
 
     except SpreadsheetNotFound:
