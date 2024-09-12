@@ -51,21 +51,19 @@ def parse_vk_data(setting_id):
                         logger.info(f"Получено {len(all_posts)} постов для группы {group.name}.")
                     except vk_api.exceptions.ApiError as e:
                         logger.error(f"Ошибка VK API при получении постов для группы {group.name}: {e}")
-                        continue
 
-                    if setting.comment:
-                        for post in all_posts:
-                            post_id = post['id']
-                            try:
-                                comments = vk.wall.getComments(owner_id=-int(group.group_id), post_id=post_id)
-                                for comment in comments['items']:
-                                    comment_date = datetime.fromtimestamp(comment['date']).date()
-                                    if comment_date >= pars_from_date:
-                                        all_comments.append(comment)
-                                logger.info(f"Получено {len(all_comments)} комментариев для поста {post_id}.")
-                            except vk_api.exceptions.ApiError as e:
-                                logger.error(f"Ошибка VK API при получении комментариев для поста {post_id}: {e}")
-                                continue
+                if setting.comment:
+                    for post in all_posts:
+                        post_id = post['id']
+                        try:
+                            comments = vk.wall.getComments(owner_id=-int(group.group_id), post_id=post_id)
+                            for comment in comments['items']:
+                                comment_date = datetime.fromtimestamp(comment['date']).date()
+                                if comment_date >= pars_from_date:
+                                    all_comments.append(comment)
+                            logger.info(f"Получено {len(all_comments)} комментариев для поста {post_id}.")
+                        except vk_api.exceptions.ApiError as e:
+                            logger.error(f"Ошибка VK API при получении комментариев для поста {post_id}: {e}")
 
                 filtered_comments.extend([
                     comment for comment in all_comments
