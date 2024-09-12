@@ -1,7 +1,6 @@
 import os
 import re
 import tempfile
-import time
 
 import requests
 from datetime import datetime, timedelta
@@ -122,11 +121,6 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
         spreadsheet = client.open(table_name)
 
         try:
-            worksheet1 = spreadsheet.worksheet(sheet_name)
-        except gspread.exceptions.WorksheetNotFound:
-            worksheet1 = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="20")
-
-        try:
             worksheet2 = spreadsheet.worksheet('Лист2')
         except gspread.exceptions.WorksheetNotFound:
             worksheet2 = spreadsheet.add_worksheet(title='Лист2', rows="100", cols="20")
@@ -146,12 +140,11 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
         headers_for_sheet2 = headers + ['Ключевые слова', 'Стоп-слова']
 
         # Проверяем, добавлены ли заголовки
-        if not worksheet1.row_values(1):
-            worksheet1.append_row(headers)
         if not worksheet2.row_values(1):
             worksheet2.append_row(headers_for_sheet2)
 
-        existing_texts_sheet2 = set(row[3] for row in worksheet2.get_all_values())
+        # Храним уникальные тексты для текущей сессии
+        existing_texts_set = set()
 
         rows_with_keywords = []
         rows_with_keywords_and_stopwords = []
@@ -167,52 +160,53 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
                 text = clean_text(item.get('text', ''))
                 found_key_words, found_stop_words = filter_text(text, keywords, stopwords)
 
-                if found_key_words or found_stop_words:
-                    if text in existing_texts_sheet2:
-                        logger.info(f"Текст уже существует в Лист2: {text}")
-                        continue
+                # Проверка уникальности на основе локального множества
+                if text in existing_texts_set:
+                    logger.info(f"Текст уже существует в текущей сессии: {text}")
+                    continue
 
-                    filtered_key_words = ', '.join(found_key_words) if found_key_words else ' '
-                    filtered_stop_words = ', '.join(found_stop_words) if found_stop_words else ' '
+                filtered_key_words = ', '.join(found_key_words) if found_key_words else ' '
+                filtered_stop_words = ', '.join(found_stop_words) if found_stop_words else ' '
 
-                    user_city = 'Город неизвестен'
-                    if item.get('from_id') and item['from_id'] > 0:
-                        user_info = vk.users.get(user_ids=item['from_id'], fields=['city'])
-                        if user_info:
-                            user_city = user_info[0].get('city', {}).get('title', 'Город неизвестен')
-                        profile_link = f"https://vk.com/id{item['from_id']}"
+                user_city = 'Город неизвестен'
+                if item.get('from_id') and item['from_id'] > 0:
+                    user_info = vk.users.get(user_ids=item['from_id'], fields=['city'])
+                    if user_info:
+                        user_city = user_info[0].get('city', {}).get('title', 'Город неизвестен')
+                    profile_link = f"https://vk.com/id{item['from_id']}"
+                else:
+                    profile_link = f"https://vk.com/club{abs(item['owner_id'])}"
+
+                post_date = datetime.fromtimestamp(item['date'], pytz.utc).astimezone(local_tz)
+                formatted_post_date = post_date.strftime('%Y-%m-%d %H:%M:%S')
+
+                row = [
+                    timezone.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    formatted_post_date,
+                    'Пост' if data_type == 'Post' else 'Комментарий',
+                    text,
+                    f"https://vk.com/wall{item['owner_id']}_{item['id']}" if data_type == 'Post' else f"https://vk.com/wall{item['owner_id']}_{item.get('post_id', '')}",
+                    profile_link,
+                    user_city if data_type == 'Comment' else group_city
+                ]
+
+                if data_type == 'Post':
+                    row.extend([group_name, group_description])
+                else:
+                    row.extend(['', ''])
+
+                row_for_sheet2 = row + [filtered_key_words, filtered_stop_words]
+
+                if filtered_key_words != ' ':
+                    if filtered_stop_words != ' ':
+                        rows_with_keywords_and_stopwords.append(row_for_sheet2)
                     else:
-                        profile_link = f"https://vk.com/club{abs(item['owner_id'])}"
+                        rows_with_keywords.append(row_for_sheet2)
+                elif filtered_stop_words != ' ':
+                    rows_with_stopwords.append(row_for_sheet2)
 
-                    post_date = datetime.fromtimestamp(item['date'], pytz.utc).astimezone(local_tz)
-                    formatted_post_date = post_date.strftime('%Y-%m-%d %H:%M:%S')
-
-                    row = [
-                        timezone.now().strftime('%Y-%m-%d %H:%M:%S'),
-                        formatted_post_date,
-                        'Пост' if data_type == 'Post' else 'Комментарий',
-                        text,
-                        f"https://vk.com/wall{item['owner_id']}_{item['id']}" if data_type == 'Post' else f"https://vk.com/wall{item['owner_id']}_{item.get('post_id', '')}",
-                        profile_link,
-                        user_city if data_type == 'Comment' else group_city
-                    ]
-
-                    if data_type == 'Post':
-                        row.extend([group_name, group_description])
-                    else:
-                        row.extend(['', ''])
-
-                    row_for_sheet2 = row + [filtered_key_words, filtered_stop_words]
-
-                    if filtered_key_words != ' ':
-                        if filtered_stop_words != ' ':
-                            rows_with_keywords_and_stopwords.append(row_for_sheet2)
-                        else:
-                            rows_with_keywords.append(row_for_sheet2)
-                    elif filtered_stop_words != ' ':
-                        rows_with_stopwords.append(row_for_sheet2)
-
-                    existing_texts_sheet2.add(text)
+                # Добавляем текст в локальное множество
+                existing_texts_set.add(text)
 
             logger.info(f"Добавляется {len(rows_with_keywords)} строк(и) с ключевыми словами.")
             logger.info(f"Добавляется {len(rows_with_keywords_and_stopwords)} строк(и) с ключевыми словами и стоп-словами.")
@@ -220,9 +214,7 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
 
             if rows_with_keywords or rows_with_keywords_and_stopwords or rows_with_stopwords:
                 rows_to_add = rows_with_keywords + rows_with_keywords_and_stopwords + rows_with_stopwords
-                if rows_to_add:
-                    worksheet2.append_rows(rows_to_add, value_input_option='USER_ENTERED')
-                    time.sleep(70)  # Увеличьте время ожидания, если необходимо
+                worksheet2.append_rows(rows_to_add, value_input_option='USER_ENTERED')
 
         logger.info(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
 
@@ -273,7 +265,6 @@ def save_all_posts_to_first_sheet(vk, table_name, sheet_name, data_type, data, g
         if data_type == 'Post':
             headers.extend(['Название группы', 'Описание группы'])
 
-        # Проверяем, добавлены ли заголовки
         if not worksheet1.row_values(1):
             worksheet1.append_row(headers)
 
@@ -300,13 +291,12 @@ def save_all_posts_to_first_sheet(vk, table_name, sheet_name, data_type, data, g
                     profile_link = f"https://vk.com/id{item['from_id']}"
                 else:
                     profile_link = f"https://vk.com/club{abs(item['owner_id'])}"
+                    post_date = datetime.fromtimestamp(item['date'], pytz.utc).astimezone(local_tz)
+                    formatted_post_date2 = post_date.strftime('%Y-%m-%d %H:%M:%S')
 
-                post_date = datetime.fromtimestamp(item['date'], pytz.utc).astimezone(local_tz)
-                formatted_post_date = post_date.strftime('%Y-%m-%d %H:%M:%S')
-
-                row = [
+                row_for_sheet1 = [
                     timezone.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    formatted_post_date,
+                    formatted_post_date2,
                     'Пост' if data_type == 'Post' else 'Комментарий',
                     text,
                     f"https://vk.com/wall{item['owner_id']}_{item['id']}" if data_type == 'Post' else f"https://vk.com/wall{item['owner_id']}_{item.get('post_id', '')}",
@@ -315,18 +305,16 @@ def save_all_posts_to_first_sheet(vk, table_name, sheet_name, data_type, data, g
                 ]
 
                 if data_type == 'Post':
-                    row.extend([group_name, group_description])
+                    row_for_sheet1.extend([group_name, group_description])
 
-                rows_for_sheet1.append(row)
+                rows_for_sheet1.append(row_for_sheet1)
                 existing_texts.add(text)
 
             logger.info(f"Добавляется {len(rows_for_sheet1)} строк(и) в лист '{sheet_name}'.")
 
             if rows_for_sheet1:
                 existing_rows = len(worksheet1.get_all_values())
-                if rows_for_sheet1:
-                    worksheet1.append_rows(rows_for_sheet1, value_input_option='USER_ENTERED')
-                    time.sleep(70)  # Увеличьте время ожидания, если необходимо
+                worksheet1.append_rows(rows_for_sheet1, value_input_option='USER_ENTERED')
 
         logger.info(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
 

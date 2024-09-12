@@ -1,6 +1,3 @@
-import time
-
-import gspread
 from huey import crontab
 from huey.contrib.djhuey import task, periodic_task, db_task
 from datetime import datetime, timedelta
@@ -27,6 +24,7 @@ def parse_vk_data(setting_id):
         groups = VKGroup.objects.all()
         spam_settings = Spam.objects.first()
 
+        # Определение даты начала парсинга
         pars_from_date = setting.pars_from or timezone.now().date()
 
         logger.info(f"Парсинг данных начиная с {pars_from_date}")
@@ -49,6 +47,7 @@ def parse_vk_data(setting_id):
                         logger.info(f"Полученные посты: {posts}")
                         for post in posts['items']:
                             post_date = datetime.fromtimestamp(post['date']).date()
+                            # Проверка даты (с этой даты)
                             if post_date >= pars_from_date:
                                 all_posts.append(post)
                         logger.info(f"Получено {len(all_posts)} постов для группы {group.name}.")
@@ -63,6 +62,7 @@ def parse_vk_data(setting_id):
                                 comments = vk.wall.getComments(owner_id=-int(group.group_id), post_id=post_id)
                                 for comment in comments['items']:
                                     comment_date = datetime.fromtimestamp(comment['date']).date()
+                                    # Проверка даты (с этой даты)
                                     if comment_date >= pars_from_date:
                                         all_comments.append(comment)
                                 logger.info(f"Получено {len(all_comments)} комментариев для поста {post_id}.")
@@ -82,48 +82,27 @@ def parse_vk_data(setting_id):
                                            setting.stopwords.split(','))
                         ])
 
+            # Сохранение данных
             table_name = setting.table_name if setting.table_name else 'DefaultSheet'
             logger.info(f"Сохранение данных для группы {group.name} в таблицу '{table_name}'.")
 
+            # Сохраняем все посты на Лист1
             if setting.post:
                 save_all_posts_to_first_sheet(vk, table_name, 'Лист1', 'Post', all_posts, group.group_id)
 
+            # Сохраняем отфильтрованные посты на Лист2, если они есть
             if setting.post and filtered_posts:
-                retry_attempts = 5
-                for attempt in range(retry_attempts):
-                    try:
-                        save_to_google_sheet(vk, table_name, 'Лист2', 'Post', filtered_posts, group.group_id,
-                                             setting.keywords.split(','), setting.stopwords.split(','))
-                        break
-                    except gspread.exceptions.APIError as api_error:
-                        if api_error.response.status_code == 429:  # Too Many Requests
-                            logger.warning(f"Достигнут лимит запросов. Попытка {attempt + 1} из {retry_attempts}.")
-                            time.sleep(60)  # Увеличьте время ожидания между попытками
-                        else:
-                            raise
-                else:
-                    logger.error("Не удалось добавить строки после нескольких попыток.")
+                save_to_google_sheet(vk, table_name, 'Лист2', 'Post', filtered_posts, group.group_id,
+                                     setting.keywords.split(','), setting.stopwords.split(','))
 
+            # Сохраняем все комментарии на Лист1
             if setting.comment:
                 save_all_posts_to_first_sheet(vk, table_name, 'Лист1', 'Comment', all_comments, group.group_id)
 
+            # Сохраняем отфильтрованные комментарии на Лист2, если они есть
             if setting.comment and filtered_comments:
-                retry_attempts = 5
-                for attempt in range(retry_attempts):
-                    try:
-                        save_to_google_sheet(vk, table_name, 'Лист2', 'Comment', filtered_comments, group.group_id,
-                                             setting.keywords.split(','), setting.stopwords.split(','))
-                        break
-                    except gspread.exceptions.APIError as api_error:
-                        if api_error.response.status_code == 429:
-                            # Ошибка "Too Many Requests", увеличиваем задержку
-                            wait_time = 60 * (attempt + 1)  # Увеличиваем время ожидания экспоненциально
-                            print(f"Превышен лимит запросов, повтор через {wait_time} секунд.")
-                            time.sleep(wait_time)
-                        else:
-                            raise
-                else:
-                    logger.error("Не удалось добавить строки после нескольких попыток.")
+                save_to_google_sheet(vk, table_name, 'Лист2', 'Comment', filtered_comments, group.group_id,
+                                     setting.keywords.split(','), setting.stopwords.split(','))
 
         logger.info(f"Завершен парсинг для настроек с ID {setting_id} - {timezone.now()}")
 
