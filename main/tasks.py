@@ -5,7 +5,7 @@ from django.utils import timezone
 import vk_api
 import logging
 from .models import ParsingSettings, VKGroup, Spam
-from .utils import save_to_google_sheet, filter_text, clean_text, get_user_token
+from .utils import save_data_to_google_sheet, filter_text, clean_text, get_user_token
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -87,20 +87,20 @@ def parse_vk_data(setting_id):
             logger.info(f"Сохранение данных для группы {group.name} в таблицу '{table_name}'.")
 
             if setting.post:
-                save_to_google_sheet(vk, table_name, 'Лист1', 'Post', all_posts, group.group_id,
-                                     setting.keywords.split(','), setting.stopwords.split(','))
+                save_data_to_google_sheet(vk, table_name, 'Лист1', 'Post', all_posts, group.group_id,
+                                         setting.keywords.split(','), setting.stopwords.split(','))
 
                 if filtered_posts:  # Сохраняем на Лист2 только если есть фильтрованные посты
-                    save_to_google_sheet(vk, table_name, 'Лист2', 'Post', filtered_posts, group.group_id,
-                                         setting.keywords.split(','), setting.stopwords.split(','))
+                    save_data_to_google_sheet(vk, table_name, 'Лист2', 'Post', filtered_posts, group.group_id,
+                                             setting.keywords.split(','), setting.stopwords.split(','))
 
             if setting.comment:
-                save_to_google_sheet(vk, table_name, 'Лист1', 'Comment', all_comments, group.group_id,
-                                     setting.keywords.split(','), setting.stopwords.split(','))
+                save_data_to_google_sheet(vk, table_name, 'Лист1', 'Comment', all_comments, group.group_id,
+                                         setting.keywords.split(','), setting.stopwords.split(','))
 
                 if filtered_comments:  # Сохраняем на Лист2 только если есть фильтрованные комментарии
-                    save_to_google_sheet(vk, table_name, 'Лист2', 'Comment', filtered_comments, group.group_id,
-                                         setting.keywords.split(','), setting.stopwords.split(','))
+                    save_data_to_google_sheet(vk, table_name, 'Лист2', 'Comment', filtered_comments, group.group_id,
+                                             setting.keywords.split(','), setting.stopwords.split(','))
 
         logger.info(f"Завершен парсинг для настроек с ID {setting_id} - {timezone.now()}")
 

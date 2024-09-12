@@ -106,7 +106,7 @@ def create_record_key(item):
     return f"{item.get('id')}_{item.get('owner_id')}_{item.get('date')}"
 
 
-def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, key_words, stop_words):
+def save_data_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, key_words=None, stop_words=None):
     try:
         settings = ParsingSettings.objects.first()
         if not settings:
@@ -128,15 +128,21 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
 
         spreadsheet = client.open(table_name)
 
-        try:
-            worksheet1 = spreadsheet.worksheet(sheet_name)
-        except gspread.exceptions.WorksheetNotFound:
-            worksheet1 = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="20")
+        # Проверка и создание листов
+        existing_worksheets = {ws.title: ws for ws in spreadsheet.worksheets()}
 
-        try:
-            worksheet2 = spreadsheet.worksheet('Лист2')
-        except gspread.exceptions.WorksheetNotFound:
-            worksheet2 = spreadsheet.add_worksheet(title='Лист2', rows="100", cols="20")
+        # Лист1
+        if sheet_name not in existing_worksheets:
+            worksheet1 = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="20")
+        else:
+            worksheet1 = existing_worksheets[sheet_name]
+
+        # Лист2 (если используется)
+        sheet2_title = 'Лист2'
+        if sheet2_title not in existing_worksheets:
+            worksheet2 = spreadsheet.add_worksheet(title=sheet2_title, rows="100", cols="20")
+        else:
+            worksheet2 = existing_worksheets[sheet2_title]
 
         headers = [
             'Дата и время выгрузки',
@@ -152,15 +158,14 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
 
         headers_for_sheet2 = headers + ['Ключевые слова', 'Стоп-слова']
 
-        # Проверяем, добавлены ли заголовки
+        # Добавление заголовков, если отсутствуют
         if not worksheet1.row_values(1):
             worksheet1.append_row(headers)
-        if not worksheet2.row_values(1):
+        if key_words and stop_words and not worksheet2.row_values(1):
             worksheet2.append_row(headers_for_sheet2)
 
-        rows_with_keywords = []
-        rows_with_keywords_and_stopwords = []
-        rows_with_stopwords = []
+        rows_for_sheet1 = []
+        rows_for_sheet2 = []
 
         group_info = vk.groups.getById(group_id=group_id, fields=['description', 'city'])[0]
         group_name = group_info.get('name', 'Неизвестно')
@@ -175,7 +180,7 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
                     continue
 
                 text = clean_text(item.get('text', ''))
-                found_key_words, found_stop_words = filter_text(text, key_words, stop_words)
+                found_key_words, found_stop_words = filter_text(text, key_words or [], stop_words or [])
 
                 filtered_key_words = ', '.join(found_key_words) if found_key_words else ' '
                 filtered_stop_words = ', '.join(found_stop_words) if found_stop_words else ' '
@@ -192,126 +197,9 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
                 post_date = datetime.fromtimestamp(item['date'], pytz.utc).astimezone(local_tz)
                 formatted_post_date = post_date.strftime('%Y-%m-%d %H:%M:%S')
 
-                row = [
-                    timezone.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    formatted_post_date,
-                    'Пост' if data_type == 'Post' else 'Комментарий',
-                    text,
-                    f"https://vk.com/wall{item['owner_id']}_{item['id']}" if data_type == 'Post' else f"https://vk.com/wall{item['owner_id']}_{item.get('post_id', '')}",
-                    profile_link,
-                    user_city if data_type == 'Comment' else group_city
-                ]
-
-                if data_type == 'Post':
-                    row.extend([group_name, group_description])
-                else:
-                    row.extend(['', ''])
-
-                row_for_sheet2 = row + [filtered_key_words, filtered_stop_words]
-
-                if filtered_key_words != ' ':
-                    if filtered_stop_words != ' ':
-                        rows_with_keywords_and_stopwords.append(row_for_sheet2)
-                    else:
-                        rows_with_keywords.append(row_for_sheet2)
-                elif filtered_stop_words != ' ':
-                    rows_with_stopwords.append(row_for_sheet2)
-
-                add_id_to_redis(post_id)  # Добавляем ID в Redis
-
-            logger.info(f"Добавляется {len(rows_with_keywords)} строк(и) с ключевыми словами.")
-            logger.info(
-                f"Добавляется {len(rows_with_keywords_and_stopwords)} строк(и) с ключевыми словами и стоп-словами.")
-            logger.info(f"Добавляется {len(rows_with_stopwords)} строк(и) со стоп-словами.")
-
-            if rows_with_keywords or rows_with_keywords_and_stopwords or rows_with_stopwords:
-                existing_rows = len(worksheet2.get_all_values())
-                rows_to_add = rows_with_keywords + rows_with_keywords_and_stopwords + rows_with_stopwords
-
-                # Используем batch update для добавления всех строк одновременно
-                worksheet2.append_rows(rows_to_add, value_input_option='USER_ENTERED')
-
-        logger.info(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
-
-    except gspread.exceptions.SpreadsheetNotFound:
-        logger.error(f"Файл '{table_name}' не найден. Убедитесь, что файл существует.")
-    except Exception as e:
-        logger.error(f"Ошибка при сохранении данных в Google Sheets: {e}")
-    finally:
-        os.remove(temp_file_path)
-
-
-def save_all_posts_to_first_sheet(vk, table_name, sheet_name, data_type, data, group_id):
-    try:
-        settings = ParsingSettings.objects.first()
-        if not settings:
-            logger.error("Настройки не найдены.")
-            return
-
-        google_sheet_file = settings.google_sheet_file
-        if not google_sheet_file:
-            logger.error("Файл авторизации не найден.")
-            return
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.json') as temp_file:
-            temp_file.write(google_sheet_file.read())
-            temp_file_path = temp_file.name
-
-        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds = ServiceAccountCredentials.from_json_keyfile_name(temp_file_path, scope)
-        client = gspread.authorize(creds)
-
-        spreadsheet = client.open(table_name)
-
-        try:
-            worksheet1 = spreadsheet.worksheet(sheet_name)
-        except gspread.exceptions.WorksheetNotFound:
-            worksheet1 = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="20")
-
-        headers = [
-            'Дата и время выгрузки',
-            'Дата публикации',
-            'Тип контента',
-            'Текст сообщения',
-            'Ссылка на источник',
-            'Ссылка на профиль пользователя',
-            'Город'
-        ]
-        if data_type == 'Post':
-            headers.extend(['Название группы', 'Описание группы'])
-
-        if not worksheet1.row_values(1):
-            worksheet1.append_row(headers)
-
-        rows_for_sheet1 = []
-
-        group_info = vk.groups.getById(group_id=group_id, fields=['description', 'city'])[0]
-        group_name = group_info.get('name', 'Неизвестно')
-        group_description = group_info.get('description', 'Описание недоступно')
-        group_city = group_info.get('city', {}).get('title', 'Город группы неизвестен')
-
-        if data:
-            for item in data:
-                post_id = f"{item['owner_id']}_{item['id']}"  # Образование уникального ID поста
-                if is_id_in_redis(post_id):
-                    logger.info(f"ID {post_id} уже существует в Redis. Пропускаем.")
-                    continue
-
-                post_date = datetime.fromtimestamp(item['date'], pytz.utc).astimezone(local_tz)
-                text = clean_text(item.get('text', ''))
-                user_city = 'Город неизвестен'
-                formatted_post_date2 = post_date.strftime('%Y-%m-%d %H:%M:%S')
-                if item.get('from_id') and item['from_id'] > 0:
-                    user_info = vk.users.get(user_ids=item['from_id'], fields=['city'])
-                    if user_info:
-                        user_city = user_info[0].get('city', {}).get('title', 'Город неизвестен')
-                    profile_link = f"https://vk.com/id{item['from_id']}"
-                else:
-                    profile_link = f"https://vk.com/club{abs(item['owner_id'])}"
-
                 row_for_sheet1 = [
                     timezone.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    formatted_post_date2,
+                    formatted_post_date,
                     'Пост' if data_type == 'Post' else 'Комментарий',
                     text,
                     f"https://vk.com/wall{item['owner_id']}_{item['id']}" if data_type == 'Post' else f"https://vk.com/wall{item['owner_id']}_{item.get('post_id', '')}",
@@ -323,15 +211,22 @@ def save_all_posts_to_first_sheet(vk, table_name, sheet_name, data_type, data, g
                     row_for_sheet1.extend([group_name, group_description])
 
                 rows_for_sheet1.append(row_for_sheet1)
+                if key_words and stop_words:
+                    row_for_sheet2 = row_for_sheet1 + [filtered_key_words, filtered_stop_words]
+                    if filtered_key_words != ' ' or filtered_stop_words != ' ':
+                        rows_for_sheet2.append(row_for_sheet2)
+
                 add_id_to_redis(post_id)  # Добавляем ID в Redis
 
-            logger.info(f"Добавляется {len(rows_for_sheet1)} строк(и) в лист '{sheet_name}'.")
-
             if rows_for_sheet1:
-                # Добавляем строки пакетно
+                logger.info(f"Добавляется {len(rows_for_sheet1)} строк(и) в лист '{sheet_name}'.")
                 worksheet1.append_rows(rows_for_sheet1, value_input_option='USER_ENTERED')
 
-        logger.info(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
+            if key_words and stop_words and rows_for_sheet2:
+                logger.info(f"Добавляется {len(rows_for_sheet2)} строк(и) в 'Лист2'.")
+                worksheet2.append_rows(rows_for_sheet2, value_input_option='USER_ENTERED')
+
+        logger.info(f"Данные успешно сохранены в лист '{sheet_name}' и 'Лист2' таблицы '{table_name}'.")
 
     except gspread.exceptions.SpreadsheetNotFound:
         logger.error(f"Файл '{table_name}' не найден. Убедитесь, что файл существует.")
