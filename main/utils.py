@@ -11,6 +11,8 @@ from django.db.models import F
 from oauth2client.service_account import ServiceAccountCredentials
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
+from datetime import datetime
+import pytz
 
 import logging
 
@@ -24,6 +26,9 @@ SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 # Авторизация
 creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
 service = build('sheets', 'v4', credentials=creds)
+
+# Устанавливаем нужный часовой пояс
+local_tz = pytz.timezone('Europe/Moscow')
 
 
 def get_google_sheet(sheet_name):
@@ -109,122 +114,124 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
             temp_file.write(google_sheet_file.read())
             temp_file_path = temp_file.name
 
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_name(temp_file_path, scope)
+        client = gspread.authorize(creds)
+
+        spreadsheet = client.open(table_name)
+
         try:
-            scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-            creds = ServiceAccountCredentials.from_json_keyfile_name(temp_file_path, scope)
-            client = gspread.authorize(creds)
+            worksheet1 = spreadsheet.worksheet(sheet_name)
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet1 = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="20")
 
-            spreadsheet = client.open(table_name)
+        try:
+            worksheet2 = spreadsheet.worksheet('Лист2')
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet2 = spreadsheet.add_worksheet(title='Лист2', rows="100", cols="20")
 
-            try:
-                worksheet1 = spreadsheet.worksheet(sheet_name)
-            except gspread.exceptions.WorksheetNotFound:
-                worksheet1 = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="20")
+        headers = [
+            'Дата и время выгрузки',
+            'Дата публикации',
+            'Тип контента',
+            'Текст сообщения',
+            'Ссылка на источник',
+            'Ссылка на профиль пользователя',
+            'Город'
+        ]
+        if data_type == 'Post':
+            headers.extend(['Название группы', 'Описание группы'])
 
-            try:
-                worksheet2 = spreadsheet.worksheet('Лист2')
-            except gspread.exceptions.WorksheetNotFound:
-                worksheet2 = spreadsheet.add_worksheet(title='Лист2', rows="100", cols="20")
+        headers_for_sheet2 = headers + ['Ключевые слова', 'Стоп-слова']
 
-            headers = [
-                'Дата и время выгрузки',
-                'Дата публикации',
-                'Тип контента',
-                'Текст сообщения',
-                'Ссылка на источник',
-                'Ссылка на профиль пользователя',
-                'Город'
-            ]
-            if data_type == 'Post':
-                headers.extend(['Название группы', 'Описание группы'])
+        # Проверяем, добавлены ли заголовки
+        if not worksheet1.row_values(1):
+            worksheet1.append_row(headers)
+        if not worksheet2.row_values(1):
+            worksheet2.append_row(headers_for_sheet2)
 
-            headers_for_sheet2 = headers + ['Ключевые слова', 'Стоп-слова']
+        existing_texts_sheet2 = set(row[3] for row in worksheet2.get_all_values())
 
-            if not worksheet1.row_values(1):
-                worksheet1.append_row(headers)
-            if not worksheet2.row_values(1):
-                worksheet2.append_row(headers_for_sheet2)
+        rows_with_keywords = []
+        rows_with_keywords_and_stopwords = []
+        rows_with_stopwords = []
 
-            existing_texts_sheet2 = set(row[3] for row in worksheet2.get_all_values())
+        group_info = vk.groups.getById(group_id=group_id, fields=['description', 'city'])[0]
+        group_name = group_info.get('name', 'Неизвестно')
+        group_description = group_info.get('description', 'Неизвестно')
+        group_city = group_info.get('city', {}).get('title', 'Город группы неизвестен')
 
-            rows_with_keywords = []
-            rows_with_keywords_and_stopwords = []
-            rows_with_stopwords = []
+        if data:
+            for item in data:
+                text = clean_text(item.get('text', ''))
+                found_key_words, found_stop_words = filter_text(text, keywords, stopwords)
 
-            group_info = vk.groups.getById(group_id=group_id, fields=['description', 'city'])[0]
-            group_name = group_info.get('name', 'Неизвестно')
-            group_description = group_info.get('description', 'Неизвестно')
-            group_city = group_info.get('city', {}).get('title', 'Город группы неизвестен')
+                if found_key_words or found_stop_words:
+                    if text in existing_texts_sheet2:
+                        logger.info(f"Текст уже существует в Лист2: {text}")
+                        continue
 
-            if data:
-                for item in data:
-                    text = clean_text(item.get('text', ''))
-                    found_key_words, found_stop_words = filter_text(text, keywords, stopwords)
+                    filtered_key_words = ', '.join(found_key_words) if found_key_words else ' '
+                    filtered_stop_words = ', '.join(found_stop_words) if found_stop_words else ' '
 
-                    if found_key_words or found_stop_words:
-                        if text in existing_texts_sheet2:
-                            logger.info(f"Текст уже существует в Лист2: {text}")
-                            continue
+                    user_city = 'Город неизвестен'
+                    if item.get('from_id') and item['from_id'] > 0:
+                        user_info = vk.users.get(user_ids=item['from_id'], fields=['city'])
+                        if user_info:
+                            user_city = user_info[0].get('city', {}).get('title', 'Город неизвестен')
+                        profile_link = f"https://vk.com/id{item['from_id']}"
+                    else:
+                        profile_link = f"https://vk.com/club{abs(item['owner_id'])}"
 
-                        filtered_key_words = ', '.join(found_key_words) if found_key_words else ' '
-                        filtered_stop_words = ', '.join(found_stop_words) if found_stop_words else ' '
+                    post_date = datetime.fromtimestamp(item['date'], pytz.utc).astimezone(local_tz)
+                    formatted_post_date = post_date.strftime('%Y-%m-%d %H:%M:%S')
 
-                        user_city = 'Город неизвестен'
-                        if item.get('from_id') and item['from_id'] > 0:
-                            user_info = vk.users.get(user_ids=item['from_id'], fields=['city'])
-                            if user_info:
-                                user_city = user_info[0].get('city', {}).get('title', 'Город неизвестен')
-                            profile_link = f"https://vk.com/id{item['from_id']}"
+                    row = [
+                        timezone.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        formatted_post_date,
+                        'Пост' if data_type == 'Post' else 'Комментарий',
+                        text,
+                        f"https://vk.com/wall{item['owner_id']}_{item['id']}" if data_type == 'Post' else f"https://vk.com/wall{item['owner_id']}_{item.get('post_id', '')}",
+                        profile_link,
+                        user_city if data_type == 'Comment' else group_city
+                    ]
+
+                    if data_type == 'Post':
+                        row.extend([group_name, group_description])
+                    else:
+                        row.extend(['', ''])
+
+                    row_for_sheet2 = row + [filtered_key_words, filtered_stop_words]
+
+                    if filtered_key_words != ' ':
+                        if filtered_stop_words != ' ':
+                            rows_with_keywords_and_stopwords.append(row_for_sheet2)
                         else:
-                            profile_link = f"https://vk.com/club{abs(item['owner_id'])}"
+                            rows_with_keywords.append(row_for_sheet2)
+                    elif filtered_stop_words != ' ':
+                        rows_with_stopwords.append(row_for_sheet2)
 
-                        post_date = datetime.fromtimestamp(item['date']) + timedelta(hours=3)
+                    existing_texts_sheet2.add(text)
 
-                        row = [
-                            timezone.now().strftime('%Y-%m-%d %H:%M:%S'),
-                            post_date.strftime('%Y-%m-%d %H:%M:%S'),
-                            'Пост' if data_type == 'Post' else 'Комментарий',
-                            text,
-                            f"https://vk.com/wall{item['owner_id']}_{item['id']}" if data_type == 'Post' else f"https://vk.com/wall{item['owner_id']}_{item.get('post_id', '')}",
-                            profile_link,
-                            user_city if data_type == 'Comment' else group_city
-                        ]
+            logger.info(f"Добавляется {len(rows_with_keywords)} строк(и) с ключевыми словами.")
+            logger.info(f"Добавляется {len(rows_with_keywords_and_stopwords)} строк(и) с ключевыми словами и стоп-словами.")
+            logger.info(f"Добавляется {len(rows_with_stopwords)} строк(и) со стоп-словами.")
 
-                        if data_type == 'Post':
-                            row.extend([group_name, group_description])
-                        else:
-                            row.extend(['', ''])
+            if rows_with_keywords or rows_with_keywords_and_stopwords or rows_with_stopwords:
+                existing_rows = len(worksheet2.get_all_values())
+                rows_to_add = rows_with_keywords + rows_with_keywords_and_stopwords + rows_with_stopwords
 
-                        row_for_sheet2 = row + [filtered_key_words, filtered_stop_words]
+                # Используем batch update для добавления всех строк одновременно
+                worksheet2.append_rows(rows_to_add, value_input_option='USER_ENTERED')
 
-                        if filtered_key_words != ' ':
-                            if filtered_stop_words != ' ':
-                                rows_with_keywords_and_stopwords.append(row_for_sheet2)
-                            else:
-                                rows_with_keywords.append(row_for_sheet2)
-                        elif filtered_stop_words != ' ':
-                            rows_with_stopwords.append(row_for_sheet2)
-
-                        existing_texts_sheet2.add(text)
-
-                logger.info(f"Добавляется {len(rows_with_keywords)} строк(и) с ключевыми словами.")
-                logger.info(f"Добавляется {len(rows_with_keywords_and_stopwords)} строк(и) с ключевыми словами и стоп-словами.")
-                logger.info(f"Добавляется {len(rows_with_stopwords)} строк(и) со стоп-словами.")
-
-                if rows_with_keywords or rows_with_keywords_and_stopwords or rows_with_stopwords:
-                    existing_rows = len(worksheet2.get_all_values())
-                    rows_to_add = rows_with_keywords + rows_with_keywords_and_stopwords + rows_with_stopwords
-                    worksheet2.insert_rows(rows_to_add, row=existing_rows + 1)
-
-            logger.info(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
-
-        finally:
-            os.remove(temp_file_path)
+        logger.info(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
 
     except gspread.exceptions.SpreadsheetNotFound:
         logger.error(f"Файл '{table_name}' не найден. Убедитесь, что файл существует.")
     except Exception as e:
         logger.error(f"Ошибка при сохранении данных в Google Sheets: {e}")
+    finally:
+        os.remove(temp_file_path)
 
 
 def save_all_posts_to_first_sheet(vk, table_name, sheet_name, data_type, data, group_id):
@@ -243,98 +250,88 @@ def save_all_posts_to_first_sheet(vk, table_name, sheet_name, data_type, data, g
             temp_file.write(google_sheet_file.read())
             temp_file_path = temp_file.name
 
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_name(temp_file_path, scope)
+        client = gspread.authorize(creds)
+
+        spreadsheet = client.open(table_name)
+
         try:
-            scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-            creds = ServiceAccountCredentials.from_json_keyfile_name(temp_file_path, scope)
-            client = gspread.authorize(creds)
+            worksheet1 = spreadsheet.worksheet(sheet_name)
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet1 = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="20")
 
-            spreadsheet = client.open(table_name)
+        headers = [
+            'Дата и время выгрузки',
+            'Дата публикации',
+            'Тип контента',
+            'Текст сообщения',
+            'Ссылка на источник',
+            'Ссылка на профиль пользователя',
+            'Город'
+        ]
+        if data_type == 'Post':
+            headers.extend(['Название группы', 'Описание группы'])
 
-            try:
-                worksheet1 = spreadsheet.worksheet(sheet_name)
-            except gspread.exceptions.WorksheetNotFound:
-                worksheet1 = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="20")
+        if not worksheet1.row_values(1):
+            worksheet1.append_row(headers)
 
-            headers = [
-                'Дата и время выгрузки',
-                'Дата публикации',
-                'Тип контента',
-                'Текст сообщения',
-                'Ссылка на источник',
-                'Ссылка на профиль пользователя',
-                'Город'
-            ]
-            if data_type == 'Post':
-                headers.extend(['Название группы', 'Описание группы'])
+        existing_texts = set(row[3] for row in worksheet1.get_all_values()[1:])
 
-            # Проверяем, добавлены ли заголовки
-            if not worksheet1.row_values(1):
-                worksheet1.append_row(headers)
+        rows_for_sheet1 = []
 
-            # Загружаем все существующие строки из листа и создаем множество текстов для проверки на дубли
-            existing_texts = set()
-            existing_rows = worksheet1.get_all_values()
-            for row in existing_rows[1:]:  # Пропускаем заголовок
-                if len(row) > 3:  # Проверяем, что в строке есть достаточно данных
-                    existing_texts.add(row[3])  # Добавляем текст сообщения
+        group_info = vk.groups.getById(group_id=group_id, fields=['description', 'city'])[0]
+        group_name = group_info.get('name', 'Неизвестно')
+        group_description = group_info.get('description', 'Описание недоступно')
+        group_city = group_info.get('city', {}).get('title', 'Город группы неизвестен')
 
-            rows_for_sheet1 = []
+        if data:
+            for item in data:
+                text = clean_text(item.get('text', ''))
+                if text in existing_texts:
+                    continue
 
-            group_info = vk.groups.getById(group_id=group_id, fields=['description', 'city'])[0]
-            group_name = group_info.get('name', 'Неизвестно')
-            group_description = group_info.get('description', 'Описание недоступно')
-            group_city = group_info.get('city', {}).get('title', 'Город группы неизвестен')
+                user_city = 'Город неизвестен'
+                if item.get('from_id') and item['from_id'] > 0:
+                    user_info = vk.users.get(user_ids=item['from_id'], fields=['city'])
+                    if user_info:
+                        user_city = user_info[0].get('city', {}).get('title', 'Город неизвестен')
+                    profile_link = f"https://vk.com/id{item['from_id']}"
+                else:
+                    profile_link = f"https://vk.com/club{abs(item['owner_id'])}"
+                    post_date = datetime.fromtimestamp(item['date'], pytz.utc).astimezone(local_tz)
+                    formatted_post_date2 = post_date.strftime('%Y-%m-%d %H:%M:%S')
 
-            if data:
-                for item in data:
-                    text = clean_text(item.get('text', ''))
-                    if text in existing_texts:
-                        # Если текст уже существует, пропускаем добавление этого поста
-                        continue
+                row_for_sheet1 = [
+                    timezone.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    formatted_post_date2,
+                    'Пост' if data_type == 'Post' else 'Комментарий',
+                    text,
+                    f"https://vk.com/wall{item['owner_id']}_{item['id']}" if data_type == 'Post' else f"https://vk.com/wall{item['owner_id']}_{item.get('post_id', '')}",
+                    profile_link,
+                    user_city if data_type == 'Comment' else group_city
+                ]
 
-                    # Сохраняем все посты на первом листе
-                    user_city = 'Город неизвестен'
-                    if item.get('from_id') and item['from_id'] > 0:
-                        user_info = vk.users.get(user_ids=item['from_id'], fields=['city'])
-                        if user_info:
-                            user_city = user_info[0].get('city', {}).get('title', 'Город неизвестен')
-                        profile_link = f"https://vk.com/id{item['from_id']}"
-                    else:
-                        profile_link = f"https://vk.com/club{abs(item['owner_id'])}"
+                if data_type == 'Post':
+                    row_for_sheet1.extend([group_name, group_description])
 
-                    post_date = datetime.fromtimestamp(item['date']) + timedelta(hours=3)
+                rows_for_sheet1.append(row_for_sheet1)
+                existing_texts.add(text)
 
-                    row_for_sheet1 = [
-                        timezone.now().strftime('%Y-%m-%d %H:%M:%S'),
-                        post_date.strftime('%Y-%m-%d %H:%M:%S'),
-                        'Пост' if data_type == 'Post' else 'Комментарий',
-                        text,
-                        f"https://vk.com/wall{item['owner_id']}_{item['id']}" if data_type == 'Post' else f"https://vk.com/wall{item['owner_id']}_{item.get('post_id', '')}",
-                        profile_link,
-                        user_city if data_type == 'Comment' else group_city
-                    ]
+            logger.info(f"Добавляется {len(rows_for_sheet1)} строк(и) в лист '{sheet_name}'.")
 
-                    if data_type == 'Post':
-                        row_for_sheet1.extend([group_name, group_description])
+            if rows_for_sheet1:
+                existing_rows = len(worksheet1.get_all_values())
+                worksheet1.append_rows(rows_for_sheet1, value_input_option='USER_ENTERED')
 
-                    rows_for_sheet1.append(row_for_sheet1)
-                    existing_texts.add(text)  # Добавляем текст в множество для последующей проверки
-
-                # Сохраняем данные на первом листе
-                logger.info(f"Добавляется {len(rows_for_sheet1)} строк(и) в лист '{sheet_name}'.")
-                if rows_for_sheet1:
-                    existing_rows = len(worksheet1.get_all_values())
-                    worksheet1.insert_rows(rows_for_sheet1, row=existing_rows + 1)
-
-            logger.info(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
-
-        finally:
-            os.remove(temp_file_path)
+        logger.info(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
 
     except gspread.exceptions.SpreadsheetNotFound:
         logger.error(f"Файл '{table_name}' не найден. Убедитесь, что файл существует.")
     except Exception as e:
         logger.error(f"Ошибка при сохранении данных в Google Sheets: {e}")
+    finally:
+        os.remove(temp_file_path)
 
 
 def log_parsing_action(action):
