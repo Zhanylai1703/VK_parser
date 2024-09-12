@@ -219,9 +219,7 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
             logger.info(f"Добавляется {len(rows_with_stopwords)} строк(и) со стоп-словами.")
 
             if rows_with_keywords or rows_with_keywords_and_stopwords or rows_with_stopwords:
-                existing_rows = len(worksheet2.get_all_values())
                 rows_to_add = rows_with_keywords + rows_with_keywords_and_stopwords + rows_with_stopwords
-
                 worksheet2.append_rows(rows_to_add, value_input_option='USER_ENTERED')
                 time.sleep(60)
 
@@ -274,18 +272,22 @@ def save_all_posts_to_first_sheet(vk, table_name, sheet_name, data_type, data, g
         if data_type == 'Post':
             headers.extend(['Название группы', 'Описание группы'])
 
+        # Установите заголовки, если они отсутствуют
         if not worksheet1.row_values(1):
             worksheet1.append_row(headers)
 
+        # Получите существующие тексты один раз, чтобы избежать избыточных чтений
         existing_texts = set(row[3] for row in worksheet1.get_all_values()[1:])
 
         rows_for_sheet1 = []
 
+        # Получите информацию о группе
         group_info = vk.groups.getById(group_id=group_id, fields=['description', 'city'])[0]
         group_name = group_info.get('name', 'Неизвестно')
         group_description = group_info.get('description', 'Описание недоступно')
         group_city = group_info.get('city', {}).get('title', 'Город группы неизвестен')
 
+        # Соберите строки для добавления
         if data:
             for item in data:
                 text = clean_text(item.get('text', ''))
@@ -300,12 +302,13 @@ def save_all_posts_to_first_sheet(vk, table_name, sheet_name, data_type, data, g
                     profile_link = f"https://vk.com/id{item['from_id']}"
                 else:
                     profile_link = f"https://vk.com/club{abs(item['owner_id'])}"
-                    post_date = datetime.fromtimestamp(item['date'], pytz.utc).astimezone(local_tz)
-                    formatted_post_date2 = post_date.strftime('%Y-%m-%d %H:%M:%S')
+
+                post_date = datetime.fromtimestamp(item['date'], pytz.utc).astimezone(local_tz)
+                formatted_post_date = post_date.strftime('%Y-%m-%d %H:%M:%S')
 
                 row_for_sheet1 = [
                     timezone.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    formatted_post_date2,
+                    formatted_post_date,
                     'Пост' if data_type == 'Post' else 'Комментарий',
                     text,
                     f"https://vk.com/wall{item['owner_id']}_{item['id']}" if data_type == 'Post' else f"https://vk.com/wall{item['owner_id']}_{item.get('post_id', '')}",
@@ -319,12 +322,10 @@ def save_all_posts_to_first_sheet(vk, table_name, sheet_name, data_type, data, g
                 rows_for_sheet1.append(row_for_sheet1)
                 existing_texts.add(text)
 
-            logger.info(f"Добавляется {len(rows_for_sheet1)} строк(и) в лист '{sheet_name}'.")
-
+            # Добавьте все собранные строки за один вызов
             if rows_for_sheet1:
-                existing_rows = len(worksheet1.get_all_values())
+                logger.info(f"Добавляется {len(rows_for_sheet1)} строк(и) в лист '{sheet_name}'.")
                 worksheet1.append_rows(rows_for_sheet1, value_input_option='USER_ENTERED')
-                time.sleep(60)
 
         logger.info(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
 
@@ -334,6 +335,7 @@ def save_all_posts_to_first_sheet(vk, table_name, sheet_name, data_type, data, g
         logger.error(f"Ошибка при сохранении данных в Google Sheets: {e}")
     finally:
         os.remove(temp_file_path)
+
 
 
 def log_parsing_action(action):
