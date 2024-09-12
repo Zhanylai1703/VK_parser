@@ -20,7 +20,7 @@ from main.models import VKGroup, UserToken, ParsingSettings
 
 logger = logging.getLogger(__name__)
 
-SERVICE_ACCOUNT_FILE = 'peaceful-bruin-432623-t7-cd1c10956dc7.json'
+SERVICE_ACCOUNT_FILE = 'parser34-9b03b5da1013.json'
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 
 # Авторизация
