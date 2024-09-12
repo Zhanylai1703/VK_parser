@@ -115,9 +115,11 @@ def parse_vk_data(setting_id):
                                              setting.keywords.split(','), setting.stopwords.split(','))
                         break
                     except gspread.exceptions.APIError as api_error:
-                        if api_error.response.status_code == 429:  # Too Many Requests
-                            logger.warning(f"Достигнут лимит запросов. Попытка {attempt + 1} из {retry_attempts}.")
-                            time.sleep(60)  # Увеличьте время ожидания между попытками
+                        if api_error.response.status_code == 429:
+                            # Ошибка "Too Many Requests", увеличиваем задержку
+                            wait_time = 60 * (attempt + 1)  # Увеличиваем время ожидания экспоненциально
+                            print(f"Превышен лимит запросов, повтор через {wait_time} секунд.")
+                            time.sleep(wait_time)
                         else:
                             raise
                 else:
