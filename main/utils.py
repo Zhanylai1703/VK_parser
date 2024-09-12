@@ -1,6 +1,8 @@
 import os
 import re
 import tempfile
+import redis
+import time
 
 import requests
 from django.utils import timezone
@@ -16,7 +18,6 @@ import pytz
 import logging
 
 from main.models import VKGroup, UserToken, ParsingSettings
-import redis
 
 # Подключение к Redis
 redis_client = redis.StrictRedis(host='localhost', port=6379, db=0)
@@ -219,6 +220,8 @@ def save_data_to_google_sheet(vk, table_name, sheet_name, data_type, data, group
                     logger.info(f"Добавляется {len(rows_for_sheet2)} строк(и) в 'Лист2'.")
                     worksheet2.append_rows(rows_for_sheet2, value_input_option='USER_ENTERED')
                     rows_for_sheet2 = []
+
+                time.sleep(1)  # Добавление задержки между пакетами запросов
 
         logger.info(f"Данные успешно сохранены в лист '{sheet_name}' и 'Лист2' таблицы '{table_name}'.")
 
