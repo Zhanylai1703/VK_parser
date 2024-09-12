@@ -299,6 +299,7 @@ def save_all_posts_to_first_sheet(vk, table_name, sheet_name, data_type, data, g
 
                 text = clean_text(item.get('text', ''))
                 user_city = 'Город неизвестен'
+                formatted_post_date2 = post_date.strftime('%Y-%m-%d %H:%M:%S')
                 if item.get('from_id') and item['from_id'] > 0:
                     user_info = vk.users.get(user_ids=item['from_id'], fields=['city'])
                     if user_info:
@@ -307,7 +308,6 @@ def save_all_posts_to_first_sheet(vk, table_name, sheet_name, data_type, data, g
                 else:
                     profile_link = f"https://vk.com/club{abs(item['owner_id'])}"
                     post_date = datetime.fromtimestamp(item['date'], pytz.utc).astimezone(local_tz)
-                    formatted_post_date2 = post_date.strftime('%Y-%m-%d %H:%M:%S')
 
                 row_for_sheet1 = [
                     timezone.now().strftime('%Y-%m-%d %H:%M:%S'),
