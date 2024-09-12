@@ -3,7 +3,6 @@ import re
 import tempfile
 
 import requests
-from datetime import datetime, timedelta
 from django.utils import timezone
 import vk_api
 import gspread
@@ -17,6 +16,10 @@ import pytz
 import logging
 
 from main.models import VKGroup, UserToken, ParsingSettings
+import redis
+
+# Подключение к Redis
+redis_client = redis.StrictRedis(host='localhost', port=6379, db=0)
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +83,14 @@ def filter_text(text, key_words, stop_words):
     return found_key_words, found_stop_words
 
 
+def is_id_in_redis(post_id):
+    return redis_client.exists(post_id)
+
+
+def add_id_to_redis(post_id, ttl=86400):  # ttl в секундах, 86400 секунд = 1 день
+    redis_client.setex(post_id, ttl, post_id)
+
+
 def clean_text(text):
     text = re.sub(r'[^\w\s]', '', text)
     text = re.sub(r'\s+', ' ', text)
@@ -107,9 +118,6 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
             logger.error("Файл авторизации не найден.")
             return
 
-        keywords = [kw.strip() for kw in settings.keywords.split(',') if kw.strip()]
-        stopwords = [sw.strip() for sw in settings.stopwords.split(',') if sw.strip()]
-
         with tempfile.NamedTemporaryFile(delete=False, suffix='.json') as temp_file:
             temp_file.write(google_sheet_file.read())
             temp_file_path = temp_file.name
@@ -119,6 +127,11 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
         client = gspread.authorize(creds)
 
         spreadsheet = client.open(table_name)
+
+        try:
+            worksheet1 = spreadsheet.worksheet(sheet_name)
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet1 = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="20")
 
         try:
             worksheet2 = spreadsheet.worksheet('Лист2')
@@ -140,11 +153,10 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
         headers_for_sheet2 = headers + ['Ключевые слова', 'Стоп-слова']
 
         # Проверяем, добавлены ли заголовки
+        if not worksheet1.row_values(1):
+            worksheet1.append_row(headers)
         if not worksheet2.row_values(1):
             worksheet2.append_row(headers_for_sheet2)
-
-        # Храним уникальные тексты для текущей сессии
-        existing_texts_set = set()
 
         rows_with_keywords = []
         rows_with_keywords_and_stopwords = []
@@ -157,13 +169,13 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
 
         if data:
             for item in data:
-                text = clean_text(item.get('text', ''))
-                found_key_words, found_stop_words = filter_text(text, keywords, stopwords)
-
-                # Проверка уникальности на основе локального множества
-                if text in existing_texts_set:
-                    logger.info(f"Текст уже существует в текущей сессии: {text}")
+                post_id = f"{item['owner_id']}_{item['id']}"  # Образование уникального ID поста
+                if is_id_in_redis(post_id):
+                    logger.info(f"ID {post_id} уже существует в Redis. Пропускаем.")
                     continue
+
+                text = clean_text(item.get('text', ''))
+                found_key_words, found_stop_words = filter_text(text, key_words, stop_words)
 
                 filtered_key_words = ', '.join(found_key_words) if found_key_words else ' '
                 filtered_stop_words = ', '.join(found_stop_words) if found_stop_words else ' '
@@ -205,15 +217,18 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
                 elif filtered_stop_words != ' ':
                     rows_with_stopwords.append(row_for_sheet2)
 
-                # Добавляем текст в локальное множество
-                existing_texts_set.add(text)
+                add_id_to_redis(post_id)  # Добавляем ID в Redis
 
             logger.info(f"Добавляется {len(rows_with_keywords)} строк(и) с ключевыми словами.")
-            logger.info(f"Добавляется {len(rows_with_keywords_and_stopwords)} строк(и) с ключевыми словами и стоп-словами.")
+            logger.info(
+                f"Добавляется {len(rows_with_keywords_and_stopwords)} строк(и) с ключевыми словами и стоп-словами.")
             logger.info(f"Добавляется {len(rows_with_stopwords)} строк(и) со стоп-словами.")
 
             if rows_with_keywords or rows_with_keywords_and_stopwords or rows_with_stopwords:
+                existing_rows = len(worksheet2.get_all_values())
                 rows_to_add = rows_with_keywords + rows_with_keywords_and_stopwords + rows_with_stopwords
+
+                # Используем batch update для добавления всех строк одновременно
                 worksheet2.append_rows(rows_to_add, value_input_option='USER_ENTERED')
 
         logger.info(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
@@ -268,8 +283,6 @@ def save_all_posts_to_first_sheet(vk, table_name, sheet_name, data_type, data, g
         if not worksheet1.row_values(1):
             worksheet1.append_row(headers)
 
-        existing_texts = set(row[3] for row in worksheet1.get_all_values()[1:])
-
         rows_for_sheet1 = []
 
         group_info = vk.groups.getById(group_id=group_id, fields=['description', 'city'])[0]
@@ -279,10 +292,12 @@ def save_all_posts_to_first_sheet(vk, table_name, sheet_name, data_type, data, g
 
         if data:
             for item in data:
-                text = clean_text(item.get('text', ''))
-                if text in existing_texts:
+                post_id = f"{item['owner_id']}_{item['id']}"  # Образование уникального ID поста
+                if is_id_in_redis(post_id):
+                    logger.info(f"ID {post_id} уже существует в Redis. Пропускаем.")
                     continue
 
+                text = clean_text(item.get('text', ''))
                 user_city = 'Город неизвестен'
                 if item.get('from_id') and item['from_id'] > 0:
                     user_info = vk.users.get(user_ids=item['from_id'], fields=['city'])
@@ -308,7 +323,7 @@ def save_all_posts_to_first_sheet(vk, table_name, sheet_name, data_type, data, g
                     row_for_sheet1.extend([group_name, group_description])
 
                 rows_for_sheet1.append(row_for_sheet1)
-                existing_texts.add(text)
+                add_id_to_redis(post_id)  # Добавляем ID в Redis
 
             logger.info(f"Добавляется {len(rows_for_sheet1)} строк(и) в лист '{sheet_name}'.")
 
