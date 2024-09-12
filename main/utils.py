@@ -1,6 +1,7 @@
 import os
 import re
 import tempfile
+import time
 
 import requests
 from datetime import datetime, timedelta
@@ -221,8 +222,8 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
                 existing_rows = len(worksheet2.get_all_values())
                 rows_to_add = rows_with_keywords + rows_with_keywords_and_stopwords + rows_with_stopwords
 
-                # Используем batch update для добавления всех строк одновременно
                 worksheet2.append_rows(rows_to_add, value_input_option='USER_ENTERED')
+                time.sleep(1)
 
         logger.info(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
 
@@ -323,6 +324,7 @@ def save_all_posts_to_first_sheet(vk, table_name, sheet_name, data_type, data, g
             if rows_for_sheet1:
                 existing_rows = len(worksheet1.get_all_values())
                 worksheet1.append_rows(rows_for_sheet1, value_input_option='USER_ENTERED')
+                time.sleep(1)
 
         logger.info(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
 
