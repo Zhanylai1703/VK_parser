@@ -297,6 +297,8 @@ def save_all_posts_to_first_sheet(vk, table_name, sheet_name, data_type, data, g
                     logger.info(f"ID {post_id} уже существует в Redis. Пропускаем.")
                     continue
 
+
+                post_date = datetime.fromtimestamp(item['date'], pytz.utc).astimezone(local_tz)
                 text = clean_text(item.get('text', ''))
                 user_city = 'Город неизвестен'
                 formatted_post_date2 = post_date.strftime('%Y-%m-%d %H:%M:%S')
@@ -307,7 +309,6 @@ def save_all_posts_to_first_sheet(vk, table_name, sheet_name, data_type, data, g
                     profile_link = f"https://vk.com/id{item['from_id']}"
                 else:
                     profile_link = f"https://vk.com/club{abs(item['owner_id'])}"
-                    post_date = datetime.fromtimestamp(item['date'], pytz.utc).astimezone(local_tz)
 
                 row_for_sheet1 = [
                     timezone.now().strftime('%Y-%m-%d %H:%M:%S'),
