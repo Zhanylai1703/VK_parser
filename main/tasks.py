@@ -64,6 +64,7 @@ def parse_vk_data(setting_id):
                             logger.info(f"Получено {len(all_comments)} комментариев для поста {post_id}.")
                         except vk_api.exceptions.ApiError as e:
                             logger.error(f"Ошибка VK API при получении комментариев для поста {post_id}: {e}")
+                            continue  # Игнорируем ошибку и продолжаем
 
                 filtered_comments.extend([
                     comment for comment in all_comments
