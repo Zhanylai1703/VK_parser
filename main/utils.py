@@ -297,7 +297,6 @@ def save_all_posts_to_first_sheet(vk, table_name, sheet_name, data_type, data, g
                     logger.info(f"ID {post_id} уже существует в Redis. Пропускаем.")
                     continue
 
-
                 post_date = datetime.fromtimestamp(item['date'], pytz.utc).astimezone(local_tz)
                 text = clean_text(item.get('text', ''))
                 user_city = 'Город неизвестен'
@@ -329,7 +328,7 @@ def save_all_posts_to_first_sheet(vk, table_name, sheet_name, data_type, data, g
             logger.info(f"Добавляется {len(rows_for_sheet1)} строк(и) в лист '{sheet_name}'.")
 
             if rows_for_sheet1:
-                existing_rows = len(worksheet1.get_all_values())
+                # Добавляем строки пакетно
                 worksheet1.append_rows(rows_for_sheet1, value_input_option='USER_ENTERED')
 
         logger.info(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
