@@ -85,11 +85,11 @@ def filter_text(text, key_words, stop_words):
 
 
 def is_id_in_redis(post_id):
-    return redis_client.exists(post_id)
+    return redis_client.sismember('parsed_ids', post_id)
 
 
-def add_id_to_redis(post_id, ttl=86400):  # ttl в секундах, 86400 секунд = 1 день
-    redis_client.setex(post_id, ttl, post_id)
+def add_id_to_redis(post_id):
+    redis_client.sadd('parsed_ids', post_id)
 
 
 def clean_text(text):
