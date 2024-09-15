@@ -140,17 +140,7 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
             worksheet2 = spreadsheet.worksheet('Лист2')
         except gspread.exceptions.WorksheetNotFound:
             worksheet2 = spreadsheet.add_worksheet(title='Лист2', rows="100", cols="20")
-            request_count += 1
-
-        # Если лимит запросов превышен, добавляем паузу перед повторной попыткой
-        def handle_quota():
-            elapsed_time = time.time() - start_time
-            if elapsed_time < 60:
-                pause_time = 60 - elapsed_time
-                logger.info(f"Достигнут лимит запросов. Пауза на {pause_time} секунд.")
-                time.sleep(pause_time)
-            request_count = 0
-            start_time = time.time()
+            request_count += 1  # Увеличиваем счетчик запросов при создании листа
 
         headers = [
             'Дата и время выгрузки',
@@ -169,37 +159,92 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
         # Проверяем, добавлены ли заголовки на Лист2
         if not worksheet2.row_values(1):
             worksheet2.append_row(headers_for_sheet2)
-            request_count += 1
+            request_count += 1  # Увеличиваем счетчик запросов
 
-        rows_to_add = []
-        for item in data:
-            post_id = f"{item['owner_id']}_{item['id']}"
-            if is_id_in_redis(post_id, 'sheet2'):
-                logger.info(f"ID {post_id} уже существует в Redis. Пропускаем.")
-                continue
+        rows_with_keywords = []
+        rows_with_keywords_and_stopwords = []
+        rows_with_stopwords = []
 
-            text = clean_text(item.get('text', ''))
-            found_key_words, found_stop_words = filter_text(text, key_words, stop_words)
+        group_info = vk.groups.getById(group_id=group_id, fields=['description', 'city'])[0]
+        group_name = group_info.get('name', 'Неизвестно')
+        group_description = group_info.get('description', 'Неизвестно')
+        group_city = group_info.get('city', {}).get('title', 'Город группы неизвестен')
 
-            if found_key_words or found_stop_words:
-                rows_to_add.append(prepare_row(item, group_id, found_key_words, found_stop_words, vk))
+        if data:
+            for item in data:
+                post_id = f"{item['owner_id']}_{item['id']}"  # Образование уникального ID поста
+                if is_id_in_redis(post_id, 'sheet2'):
+                    logger.info(f"ID {post_id} уже существует в Redis. Пропускаем.")
+                    continue
 
-            add_id_to_redis(post_id, 'sheet2')
+                text = clean_text(item.get('text', ''))
+                found_key_words, found_stop_words = filter_text(text, key_words, stop_words)
 
-        # Отправка данных по частям, чтобы избежать превышения лимита запросов
-        BATCH_SIZE = 50  # Пример размера партии
-        for i in range(0, len(rows_to_add), BATCH_SIZE):
-            batch = rows_to_add[i:i+BATCH_SIZE]
-            try:
-                if request_count + len(batch) >= MAX_REQUESTS_PER_MINUTE:
-                    handle_quota()
-                worksheet2.append_rows(batch, value_input_option='USER_ENTERED')
-                request_count += len(batch)
-            except gspread.exceptions.APIError as e:
-                logger.error(f"Ошибка API: {e}")
-                handle_quota()
+                filtered_key_words = ', '.join(found_key_words) if found_key_words else ' '
+                filtered_stop_words = ', '.join(found_stop_words) if found_stop_words else ' '
 
-        logger.info(f"Данные успешно сохранены в лист '{sheet_name}'.")
+                user_city = 'Город неизвестен'
+                if item.get('from_id') and item['from_id'] > 0:
+                    user_info = vk.users.get(user_ids=item['from_id'], fields=['city'])
+                    if user_info:
+                        user_city = user_info[0].get('city', {}).get('title', 'Город неизвестен')
+                    profile_link = f"https://vk.com/id{item['from_id']}"
+                else:
+                    profile_link = f"https://vk.com/club{abs(item['owner_id'])}"
+
+                post_date = datetime.fromtimestamp(item['date'], pytz.utc).astimezone(local_tz)
+                formatted_post_date = post_date.strftime('%Y-%m-%d %H:%M:%S')
+
+                row = [
+                    timezone.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    formatted_post_date,
+                    'Пост' if data_type == 'Post' else 'Комментарий',
+                    text,
+                    f"https://vk.com/wall{item['owner_id']}_{item['id']}" if data_type == 'Post' else f"https://vk.com/wall{item['owner_id']}_{item.get('post_id', '')}",
+                    profile_link,
+                    user_city if data_type == 'Comment' else group_city
+                ]
+
+                if data_type == 'Post':
+                    row.extend([group_name, group_description])
+                else:
+                    row.extend(['', ''])
+
+                row_for_sheet2 = row + [filtered_key_words, filtered_stop_words]
+
+                if filtered_key_words != ' ':
+                    if filtered_stop_words != ' ':
+                        rows_with_keywords_and_stopwords.append(row_for_sheet2)
+                    else:
+                        rows_with_keywords.append(row_for_sheet2)
+                elif filtered_stop_words != ' ':
+                    rows_with_stopwords.append(row_for_sheet2)
+
+                add_id_to_redis(post_id, 'sheet2')  # Добавляем ID в Redis
+
+            logger.info(f"Добавляется {len(rows_with_keywords)} строк(и) с ключевыми словами.")
+            logger.info(
+                f"Добавляется {len(rows_with_keywords_and_stopwords)} строк(и) с ключевыми словами и стоп-словами.")
+            logger.info(f"Добавляется {len(rows_with_stopwords)} строк(и) со стоп-словами.")
+
+            if rows_with_keywords or rows_with_keywords_and_stopwords or rows_with_stopwords:
+                rows_to_add = rows_with_keywords + rows_with_keywords_and_stopwords + rows_with_stopwords
+
+                # Если количество запросов превышает лимит, приостанавливаем выполнение
+                if request_count + len(rows_to_add) >= MAX_REQUESTS_PER_MINUTE:
+                    elapsed_time = time.time() - start_time
+                    if elapsed_time < 60:
+                        pause_time = 60 - elapsed_time
+                        logger.info(f"Достигнут лимит запросов. Пауза на {pause_time} секунд.")
+                        time.sleep(pause_time)
+                    request_count = 0
+                    start_time = time.time()
+
+                # Используем batch update для добавления всех строк одновременно
+                worksheet2.append_rows(rows_to_add, value_input_option='USER_ENTERED')
+                request_count += len(rows_to_add)
+
+        logger.info(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
 
     except gspread.exceptions.SpreadsheetNotFound:
         logger.error(f"Файл '{table_name}' не найден. Убедитесь, что файл существует.")
@@ -310,16 +355,7 @@ def save_all_posts_to_first_sheet(vk, table_name, sheet_name, data_type, data, g
             logger.info(f"Добавляется {len(rows_for_sheet1)} строк(и) в лист '{sheet_name}'.")
 
             if rows_for_sheet1:
-                # Если количество запросов превышает лимит, добавляем ожидание между попытками
-                try:
-                    worksheet1.append_rows(rows_for_sheet1, value_input_option='USER_ENTERED')
-                except gspread.exceptions.APIError as e:
-                    if '429' in str(e):
-                        logger.error(f"Превышен лимит запросов. Пауза на 60 секунд.")
-                        time.sleep(60)  # Пауза на 60 секунд
-                        worksheet1.append_rows(rows_for_sheet1, value_input_option='USER_ENTERED')
-                    else:
-                        raise e
+                worksheet1.append_rows(rows_for_sheet1, value_input_option='USER_ENTERED')
 
         logger.info(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
 
