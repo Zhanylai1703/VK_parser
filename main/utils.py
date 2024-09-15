@@ -1,8 +1,6 @@
 import os
 import re
 import tempfile
-import redis
-import time
 
 import requests
 from django.utils import timezone
@@ -18,6 +16,8 @@ import pytz
 import logging
 
 from main.models import VKGroup, UserToken, ParsingSettings
+import redis
+import time
 
 # Подключение к Redis
 redis_client = redis.StrictRedis(host='localhost', port=6379, db=0)
@@ -33,6 +33,9 @@ service = build('sheets', 'v4', credentials=creds)
 
 # Устанавливаем нужный часовой пояс
 local_tz = pytz.timezone('Europe/Moscow')
+MAX_REQUESTS_PER_MINUTE = 250  # Максимальное количество запросов в минуту
+request_count = 0  # Счетчик запросов
+start_time = time.time()  # Время начала отсчета запросов
 
 
 def get_google_sheet(sheet_name):
@@ -84,12 +87,14 @@ def filter_text(text, key_words, stop_words):
     return found_key_words, found_stop_words
 
 
-def is_id_in_redis(post_id):
-    return redis_client.sismember('parsed_ids', post_id)
+def is_id_in_redis(post_id, sheet):
+    """Checks if the post ID exists in Redis for the specific sheet (first or second)."""
+    return redis_client.exists(f"{sheet}:{post_id}")
 
 
-def add_id_to_redis(post_id):
-    redis_client.sadd('parsed_ids', post_id)
+def add_id_to_redis(post_id, sheet, ttl=86400):  # ttl = 1 day by default
+    """Adds the post ID to Redis for the specific sheet with a TTL."""
+    redis_client.setex(f"{sheet}:{post_id}", ttl, post_id)
 
 
 def clean_text(text):
@@ -107,7 +112,9 @@ def create_record_key(item):
     return f"{item.get('id')}_{item.get('owner_id')}_{item.get('date')}"
 
 
-def save_data_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, key_words=None, stop_words=None):
+def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, key_words, stop_words):
+    global request_count, start_time  # Используем глобальные переменные для отслеживания количества запросов
+
     try:
         settings = ParsingSettings.objects.first()
         if not settings:
@@ -128,10 +135,12 @@ def save_data_to_google_sheet(vk, table_name, sheet_name, data_type, data, group
         client = gspread.authorize(creds)
 
         spreadsheet = client.open(table_name)
-        existing_worksheets = {ws.title: ws for ws in spreadsheet.worksheets()}
 
-        worksheet1 = existing_worksheets.get(sheet_name) or spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="20")
-        worksheet2 = existing_worksheets.get('Лист2') or spreadsheet.add_worksheet(title='Лист2', rows="100", cols="20")
+        try:
+            worksheet2 = spreadsheet.worksheet('Лист2')
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet2 = spreadsheet.add_worksheet(title='Лист2', rows="100", cols="20")
+            request_count += 1  # Увеличиваем счетчик запросов при создании листа
 
         headers = [
             'Дата и время выгрузки',
@@ -147,83 +156,208 @@ def save_data_to_google_sheet(vk, table_name, sheet_name, data_type, data, group
 
         headers_for_sheet2 = headers + ['Ключевые слова', 'Стоп-слова']
 
-        if not worksheet1.row_values(1):
-            worksheet1.append_row(headers)
-        if key_words and stop_words and not worksheet2.row_values(1):
+        # Проверяем, добавлены ли заголовки на Лист2
+        if not worksheet2.row_values(1):
             worksheet2.append_row(headers_for_sheet2)
+            request_count += 1  # Увеличиваем счетчик запросов
+
+        rows_with_keywords = []
+        rows_with_keywords_and_stopwords = []
+        rows_with_stopwords = []
 
         group_info = vk.groups.getById(group_id=group_id, fields=['description', 'city'])[0]
         group_name = group_info.get('name', 'Неизвестно')
         group_description = group_info.get('description', 'Неизвестно')
         group_city = group_info.get('city', {}).get('title', 'Город группы неизвестен')
 
-        def chunks(lst, n):
-            for i in range(0, len(lst), n):
-                yield lst[i:i + n]
+        if data:
+            for item in data:
+                post_id = f"{item['owner_id']}_{item['id']}"  # Образование уникального ID поста
+                if is_id_in_redis(post_id, 'sheet2'):
+                    logger.info(f"ID {post_id} уже существует в Redis. Пропускаем.")
+                    continue
+
+                text = clean_text(item.get('text', ''))
+                found_key_words, found_stop_words = filter_text(text, key_words, stop_words)
+
+                filtered_key_words = ', '.join(found_key_words) if found_key_words else ' '
+                filtered_stop_words = ', '.join(found_stop_words) if found_stop_words else ' '
+
+                user_city = 'Город неизвестен'
+                if item.get('from_id') and item['from_id'] > 0:
+                    user_info = vk.users.get(user_ids=item['from_id'], fields=['city'])
+                    if user_info:
+                        user_city = user_info[0].get('city', {}).get('title', 'Город неизвестен')
+                    profile_link = f"https://vk.com/id{item['from_id']}"
+                else:
+                    profile_link = f"https://vk.com/club{abs(item['owner_id'])}"
+
+                post_date = datetime.fromtimestamp(item['date'], pytz.utc).astimezone(local_tz)
+                formatted_post_date = post_date.strftime('%Y-%m-%d %H:%M:%S')
+
+                row = [
+                    timezone.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    formatted_post_date,
+                    'Пост' if data_type == 'Post' else 'Комментарий',
+                    text,
+                    f"https://vk.com/wall{item['owner_id']}_{item['id']}" if data_type == 'Post' else f"https://vk.com/wall{item['owner_id']}_{item.get('post_id', '')}",
+                    profile_link,
+                    user_city if data_type == 'Comment' else group_city
+                ]
+
+                if data_type == 'Post':
+                    row.extend([group_name, group_description])
+                else:
+                    row.extend(['', ''])
+
+                row_for_sheet2 = row + [filtered_key_words, filtered_stop_words]
+
+                if filtered_key_words != ' ':
+                    if filtered_stop_words != ' ':
+                        rows_with_keywords_and_stopwords.append(row_for_sheet2)
+                    else:
+                        rows_with_keywords.append(row_for_sheet2)
+                elif filtered_stop_words != ' ':
+                    rows_with_stopwords.append(row_for_sheet2)
+
+                add_id_to_redis(post_id, 'sheet2')  # Добавляем ID в Redis
+
+            logger.info(f"Добавляется {len(rows_with_keywords)} строк(и) с ключевыми словами.")
+            logger.info(
+                f"Добавляется {len(rows_with_keywords_and_stopwords)} строк(и) с ключевыми словами и стоп-словами.")
+            logger.info(f"Добавляется {len(rows_with_stopwords)} строк(и) со стоп-словами.")
+
+            if rows_with_keywords or rows_with_keywords_and_stopwords or rows_with_stopwords:
+                rows_to_add = rows_with_keywords + rows_with_keywords_and_stopwords + rows_with_stopwords
+
+                # Если количество запросов превышает лимит, приостанавливаем выполнение
+                if request_count + len(rows_to_add) >= MAX_REQUESTS_PER_MINUTE:
+                    elapsed_time = time.time() - start_time
+                    if elapsed_time < 60:
+                        pause_time = 60 - elapsed_time
+                        logger.info(f"Достигнут лимит запросов. Пауза на {pause_time} секунд.")
+                        time.sleep(pause_time)
+                    request_count = 0
+                    start_time = time.time()
+
+                # Используем batch update для добавления всех строк одновременно
+                worksheet2.append_rows(rows_to_add, value_input_option='USER_ENTERED')
+                request_count += len(rows_to_add)
+
+        logger.info(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
+
+    except gspread.exceptions.SpreadsheetNotFound:
+        logger.error(f"Файл '{table_name}' не найден. Убедитесь, что файл существует.")
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении данных в Google Sheets: {e}")
+    finally:
+        os.remove(temp_file_path)
+
+
+def save_all_posts_to_first_sheet(vk, table_name, sheet_name, data_type, data, group_id):
+    global request_count, start_time  # Используем глобальные переменные для отслеживания количества запросов
+
+    try:
+        settings = ParsingSettings.objects.first()
+        if not settings:
+            logger.error("Настройки не найдены.")
+            return
+
+        google_sheet_file = settings.google_sheet_file
+        if not google_sheet_file:
+            logger.error("Файл авторизации не найден.")
+            return
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.json') as temp_file:
+            temp_file.write(google_sheet_file.read())
+            temp_file_path = temp_file.name
+
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_name(temp_file_path, scope)
+        client = gspread.authorize(creds)
+
+        spreadsheet = client.open(table_name)
+
+        try:
+            worksheet1 = spreadsheet.worksheet(sheet_name)
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet1 = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="20")
+            request_count += 1  # Увеличиваем счетчик запросов при создании листа
+
+        headers = [
+            'Дата и время выгрузки',
+            'Дата публикации',
+            'Тип контента',
+            'Текст сообщения',
+            'Ссылка на источник',
+            'Ссылка на профиль пользователя',
+            'Город'
+        ]
+        if data_type == 'Post':
+            headers.extend(['Название группы', 'Описание группы'])
+
+        if not worksheet1.row_values(1):
+            worksheet1.append_row(headers)
+            request_count += 1  # Увеличиваем счетчик запросов при добавлении заголовков
 
         rows_for_sheet1 = []
-        rows_for_sheet2 = []
+
+        group_info = vk.groups.getById(group_id=group_id, fields=['description', 'city'])[0]
+        group_name = group_info.get('name', 'Неизвестно')
+        group_description = group_info.get('description', 'Описание недоступно')
+        group_city = group_info.get('city', {}).get('title', 'Город группы неизвестен')
 
         if data:
-            for chunk in chunks(data, 20):  # Отправляем данные партиями по 20 элементов
-                for item in chunk:
-                    post_id = f"{item['owner_id']}_{item['id']}"
-                    if is_id_in_redis(post_id):
-                        logger.info(f"ID {post_id} уже существует в Redis. Пропускаем.")
-                        continue
+            for item in data:
+                post_id = f"{item['owner_id']}_{item['id']}"  # Образование уникального ID поста
+                if is_id_in_redis(post_id, 'sheet1'):
+                    logger.info(f"ID {post_id} уже существует в Redis. Пропускаем.")
+                    continue
 
-                    text = clean_text(item.get('text', ''))
-                    found_key_words, found_stop_words = filter_text(text, key_words or [], stop_words or [])
+                post_date = datetime.fromtimestamp(item['date'], pytz.utc).astimezone(local_tz)
+                text = clean_text(item.get('text', ''))
+                user_city = 'Город неизвестен'
+                formatted_post_date2 = post_date.strftime('%Y-%m-%d %H:%M:%S')
+                if item.get('from_id') and item['from_id'] > 0:
+                    user_info = vk.users.get(user_ids=item['from_id'], fields=['city'])
+                    if user_info:
+                        user_city = user_info[0].get('city', {}).get('title', 'Город неизвестен')
+                    profile_link = f"https://vk.com/id{item['from_id']}"
+                else:
+                    profile_link = f"https://vk.com/club{abs(item['owner_id'])}"
 
-                    filtered_key_words = ', '.join(found_key_words) if found_key_words else ' '
-                    filtered_stop_words = ', '.join(found_stop_words) if found_stop_words else ' '
+                row_for_sheet1 = [
+                    timezone.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    formatted_post_date2,
+                    'Пост' if data_type == 'Post' else 'Комментарий',
+                    text,
+                    f"https://vk.com/wall{item['owner_id']}_{item['id']}" if data_type == 'Post' else f"https://vk.com/wall{item['owner_id']}_{item.get('post_id', '')}",
+                    profile_link,
+                    user_city if data_type == 'Comment' else group_city
+                ]
 
-                    user_city = 'Город неизвестен'
-                    if item.get('from_id') and item['from_id'] > 0:
-                        user_info = vk.users.get(user_ids=item['from_id'], fields=['city'])
-                        if user_info:
-                            user_city = user_info[0].get('city', {}).get('title', 'Город неизвестен')
-                        profile_link = f"https://vk.com/id{item['from_id']}"
-                    else:
-                        profile_link = f"https://vk.com/club{abs(item['owner_id'])}"
+                if data_type == 'Post':
+                    row_for_sheet1.extend([group_name, group_description])
 
-                    post_date = datetime.fromtimestamp(item['date'], pytz.utc).astimezone(local_tz)
-                    formatted_post_date = post_date.strftime('%Y-%m-%d %H:%M:%S')
+                rows_for_sheet1.append(row_for_sheet1)
+                add_id_to_redis(post_id, 'sheet1')  # Добавляем ID в Redis
 
-                    row_for_sheet1 = [
-                        timezone.now().strftime('%Y-%m-%d %H:%M:%S'),
-                        formatted_post_date,
-                        'Пост' if data_type == 'Post' else 'Комментарий',
-                        text,
-                        f"https://vk.com/wall{item['owner_id']}_{item['id']}" if data_type == 'Post' else f"https://vk.com/wall{item['owner_id']}_{item.get('post_id', '')}",
-                        profile_link,
-                        user_city if data_type == 'Comment' else group_city
-                    ]
+                request_count += 1  # Увеличиваем счетчик запросов
+                if request_count >= MAX_REQUESTS_PER_MINUTE:
+                    elapsed_time = time.time() - start_time
+                    if elapsed_time < 60:
+                        pause_time = 60 - elapsed_time
+                        logger.info(f"Достигнут лимит запросов ({MAX_REQUESTS_PER_MINUTE} в минуту). Пауза на {pause_time} секунд.")
+                        time.sleep(pause_time)  # Пауза для сброса лимита
+                    request_count = 0  # Сбрасываем счетчик
+                    start_time = time.time()  # Обновляем время старта
 
-                    if data_type == 'Post':
-                        row_for_sheet1.extend([group_name, group_description])
+            logger.info(f"Добавляется {len(rows_for_sheet1)} строк(и) в лист '{sheet_name}'.")
 
-                    rows_for_sheet1.append(row_for_sheet1)
-                    if key_words and stop_words:
-                        row_for_sheet2 = row_for_sheet1 + [filtered_key_words, filtered_stop_words]
-                        if filtered_key_words != ' ' or filtered_stop_words != ' ':
-                            rows_for_sheet2.append(row_for_sheet2)
+            if rows_for_sheet1:
+                worksheet1.append_rows(rows_for_sheet1, value_input_option='USER_ENTERED')
 
-                    add_id_to_redis(post_id)  # Добавляем ID в Redis
-
-                if rows_for_sheet1:
-                    logger.info(f"Добавляется {len(rows_for_sheet1)} строк(и) в лист '{sheet_name}'.")
-                    worksheet1.append_rows(rows_for_sheet1, value_input_option='USER_ENTERED')
-                    rows_for_sheet1 = []
-
-                if key_words and stop_words and rows_for_sheet2:
-                    logger.info(f"Добавляется {len(rows_for_sheet2)} строк(и) в 'Лист2'.")
-                    worksheet2.append_rows(rows_for_sheet2, value_input_option='USER_ENTERED')
-                    rows_for_sheet2 = []
-
-                time.sleep(1)  # Добавление задержки между пакетами запросов
-
-        logger.info(f"Данные успешно сохранены в лист '{sheet_name}' и 'Лист2' таблицы '{table_name}'.")
+        logger.info(f"Данные успешно сохранены в лист '{sheet_name}' таблицы '{table_name}'.")
 
     except gspread.exceptions.SpreadsheetNotFound:
         logger.error(f"Файл '{table_name}' не найден. Убедитесь, что файл существует.")
