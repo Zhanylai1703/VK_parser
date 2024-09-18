@@ -1,6 +1,6 @@
 from huey import crontab
-from huey.contrib.djhuey import task, periodic_task, db_task
-from datetime import datetime, timedelta
+from huey.contrib.djhuey import task, periodic_task
+from datetime import datetime
 from django.utils import timezone
 import vk_api
 import logging

@@ -57,3 +57,5 @@ class ParsingSettingsAdmin(admin.ModelAdmin):
 @admin.register(UserToken)
 class UserTokenAdmin(admin.ModelAdmin):
     list_display = ['user_id', 'requests_used', 'last_used']
+    readonly_fields = ('requests_used', 'daily_limit')  # Указание полей только для чтения
+

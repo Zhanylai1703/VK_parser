@@ -92,7 +92,7 @@ def is_id_in_redis(post_id, sheet):
     return redis_client.exists(f"{sheet}:{post_id}")
 
 
-def add_id_to_redis(post_id, sheet, ttl=86400):  # ttl = 1 day by default
+def add_id_to_redis(post_id, sheet, ttl=7776000):
     """Adds the post ID to Redis for the specific sheet with a TTL."""
     redis_client.setex(f"{sheet}:{post_id}", ttl, post_id)
 
@@ -217,15 +217,12 @@ def save_to_google_sheet(vk, table_name, sheet_name, data_type, data, group_id, 
                         rows_with_keywords_and_stopwords.append(row_for_sheet2)
                     else:
                         rows_with_keywords.append(row_for_sheet2)
-                elif filtered_stop_words != ' ':
-                    rows_with_stopwords.append(row_for_sheet2)
 
                 add_id_to_redis(post_id, 'sheet2')  # Добавляем ID в Redis
 
             logger.info(f"Добавляется {len(rows_with_keywords)} строк(и) с ключевыми словами.")
             logger.info(
                 f"Добавляется {len(rows_with_keywords_and_stopwords)} строк(и) с ключевыми словами и стоп-словами.")
-            logger.info(f"Добавляется {len(rows_with_stopwords)} строк(и) со стоп-словами.")
 
             if rows_with_keywords or rows_with_keywords_and_stopwords or rows_with_stopwords:
                 rows_to_add = rows_with_keywords + rows_with_keywords_and_stopwords + rows_with_stopwords
@@ -401,8 +398,13 @@ def get_group_id_by_domain(domain):
 
 
 def get_user_token():
-    tokens = UserToken.objects.filter(requests_used__lt=F('daily_limit'))
-    if tokens:
-        return tokens.first()  # Выбираем первый токен с доступным лимитом
+    tokens = UserToken.objects.filter(requests_used__lt=F('daily_limit')).order_by('last_used')
+
+    if tokens.exists():
+        token = tokens.first()  # Выбираем первый токен с доступным лимитом
+        token.requests_used = F('requests_used') + 1  # Увеличиваем количество использованных запросов
+        token.last_used = timezone.now()  # Обновляем время последнего использования
+        token.save(update_fields=['requests_used', 'last_used'])  # Сохраняем изменения
+        return token
     else:
         raise Exception("Нет доступных токенов с квотой")
