@@ -28,7 +28,11 @@ class ParsingSettings(models.Model):
     comment = models.BooleanField(default=True, verbose_name="Парсить комментарии")
     post = models.BooleanField(default=True, verbose_name="Парсить посты")
     pars_from = models.DateField(verbose_name="Парсить с даты", null=True, blank=True)
-    interval = models.IntegerField(verbose_name="Интервал", default=5)
+    interval = models.IntegerField(
+        verbose_name="Интервал",
+        default=5,
+        help_text="Установите интервал минутах"
+    )
     google_sheet_file = models.FileField(
         help_text="Загрузите файл json",
         upload_to="files/%Y/%m/%d/",
