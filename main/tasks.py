@@ -1,9 +1,11 @@
 from huey import crontab
-from huey.contrib.djhuey import task, periodic_task
+from huey.contrib.djhuey import task, periodic_task, db_task
 from datetime import datetime
 from django.utils import timezone
 import vk_api
 import logging
+
+from .forms import VKGroupMassCreateForm
 from .models import ParsingSettings, VKGroup, Spam
 from .utils import save_to_google_sheet, filter_text, clean_text, get_user_token, save_all_posts_to_first_sheet
 
@@ -119,3 +121,11 @@ def schedule_parse_vk_data():
 
     except Exception as e:
         logger.error(f"Ошибка в расписании задачи parse_vk_data: {e}")
+
+
+@db_task()
+def add_vk_groups_async(form_data):
+    # Здесь можно использовать сохранение формы или индивидуальную обработку данных
+    form = VKGroupMassCreateForm(form_data)
+    if form.is_valid():
+        form.save()

@@ -10,15 +10,15 @@ class VKGroupMassCreateForm(forms.Form):
         # Разбиваем введенные ссылки на список строк
         urls = self.cleaned_data['urls'].splitlines()
 
-        # Получаем список доменов существующих групп из базы данных
-        existing_domains = VKGroup.objects.values_list('group_domain', flat=True)
+        # Получаем список существующих доменов и group_id из базы данных
+        existing_domains = set(VKGroup.objects.values_list('group_domain', flat=True))
+        existing_group_ids = set(VKGroup.objects.values_list('group_id', flat=True))
 
-        groups = []
         for url in urls:
             domain = url.strip().split("/")[-1]  # Извлекаем домен из URL
             print(f"Обрабатываем домен: {domain}")
 
-            # Проверяем, существует ли уже группа с таким доменом в базе данных
+            # Проверяем, существует ли уже группа с таким доменом
             if domain in existing_domains:
                 print(f"Группа с доменом {domain} уже существует.")
                 continue  # Пропускаем добавление этой группы
@@ -27,15 +27,16 @@ class VKGroupMassCreateForm(forms.Form):
             group_id = get_group_id_by_domain(domain)
             if group_id:
                 print(f"Найден group_id: {group_id}")
-                # Создаем новый экземпляр VKGroup и добавляем его в список
-                groups.append(VKGroup(name=domain, group_id=group_id, group_domain=domain))
+
+                # Используем get_or_create, чтобы избежать дублирования
+                vk_group, created = VKGroup.objects.get_or_create(
+                    group_id=group_id,
+                    defaults={'name': domain, 'group_domain': domain}
+                )
+
+                if created:
+                    print(f"Группа {domain} добавлена.")
+                else:
+                    print(f"Группа с group_id {group_id} уже существует.")
             else:
                 print(f"Не удалось получить group_id для домена: {domain}")
-
-        # Оптимально добавляем новые экземпляры VKGroup в базу данных
-        if groups:
-            VKGroup.objects.bulk_create(groups)
-            print(f"Добавлено {len(groups)} групп.")
-        else:
-            print("Нет групп для добавления.")
-
